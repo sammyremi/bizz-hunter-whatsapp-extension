@@ -20,7 +20,13 @@
   // Safe diagnostic log
   console.log(`[BizzHunter-WA] Detected send link for ${urlInfo.phoneMasked} (msg length: ${urlInfo.textSummary.length})`);
 
-  // 1. Notify background that a valid Send page is detected
+  // 1. Notify background that a valid Send page is detected and store pending message text directly
+  if (urlInfo.text) {
+    chrome.storage.local.set({
+      [BH.StorageKey.PENDING_MESSAGE_TEXT]: urlInfo.text
+    }).catch(() => {});
+  }
+
   chrome.runtime.sendMessage({
     type: BH.MessageType.SEND_PAGE_DETECTED,
     payload: {
@@ -34,9 +40,34 @@
     }
   }).catch(() => {});
 
+  // Intercept any manual click on web.whatsapp.com links to guarantee text parameter is included
+  document.addEventListener('click', (e) => {
+    const anchor = e.target.closest && e.target.closest('a[href*="web.whatsapp.com"]');
+    if (anchor && urlInfo.text) {
+      const currentHref = anchor.getAttribute('href') || '';
+      if (!currentHref.includes('text=')) {
+        const sep = currentHref.includes('?') ? '&' : '?';
+        const enhanced = `${currentHref}${sep}text=${encodeURIComponent(urlInfo.text)}`;
+        anchor.setAttribute('href', enhanced);
+      }
+    }
+  }, true);
+
   let continueElement = null;
   let observerHandle = null;
   let hasAutoClicked = false;
+
+  function ensureHrefCarriesText(el) {
+    if (!el || !urlInfo.text) return;
+    if (el.tagName && el.tagName.toLowerCase() === 'a') {
+      const currentHref = el.getAttribute('href') || '';
+      if (currentHref.includes('web.whatsapp.com') && !currentHref.includes('text=')) {
+        const separator = currentHref.includes('?') ? '&' : '?';
+        const enhancedHref = `${currentHref}${separator}text=${encodeURIComponent(urlInfo.text)}`;
+        el.setAttribute('href', enhancedHref);
+      }
+    }
+  }
 
   async function triggerAutoContinue(result) {
     if (hasAutoClicked) return;
@@ -56,6 +87,15 @@
     hasAutoClicked = true;
     console.log(`[BizzHunter-WA] Auto-clicking Continue control immediately: "${result.visibleText}"`);
 
+    // Ensure link has text parameter
+    ensureHrefCarriesText(continueElement);
+
+    let destination = result.destinationUrl;
+    if (urlInfo.text && destination && destination.includes('web.whatsapp.com') && !destination.includes('text=')) {
+      const sep = destination.includes('?') ? '&' : '?';
+      destination = `${destination}${sep}text=${encodeURIComponent(urlInfo.text)}`;
+    }
+
     // Notify background that auto-continue is executing
     chrome.runtime.sendMessage({
       type: BH.MessageType.CONTINUE_PAGE_STATUS,
@@ -63,7 +103,7 @@
         found: true,
         isReady: true,
         visibleText: result.visibleText,
-        destinationUrl: result.destinationUrl,
+        destinationUrl: destination,
         targetType: result.targetType,
         autoTriggered: true
       }
@@ -73,6 +113,7 @@
     setTimeout(() => {
       try {
         if (continueElement) {
+          ensureHrefCarriesText(continueElement);
           // Perform native click and dispatch synthetic event
           continueElement.click();
           continueElement.dispatchEvent(new MouseEvent('click', {
@@ -86,12 +127,12 @@
       }
 
       // Ensure navigation fallback: if Brave popup blocker suppressed opening a new tab
-      if (result.destinationUrl && result.destinationUrl.includes('web.whatsapp.com')) {
+      if (destination && destination.includes('web.whatsapp.com')) {
         setTimeout(() => {
           chrome.runtime.sendMessage({
             type: BH.MessageType.ENSURE_WEB_NAVIGATION,
             payload: {
-              destinationUrl: result.destinationUrl
+              destinationUrl: destination
             }
           }).catch(() => {});
         }, 1000);
@@ -104,6 +145,13 @@
     observerHandle = BH.observeContinueControl(document, (result) => {
       if (result.found) {
         continueElement = result.element;
+        ensureHrefCarriesText(continueElement);
+
+        if (urlInfo.text && result.destinationUrl && result.destinationUrl.includes('web.whatsapp.com') && !result.destinationUrl.includes('text=')) {
+          const separator = result.destinationUrl.includes('?') ? '&' : '?';
+          result.destinationUrl = `${result.destinationUrl}${separator}text=${encodeURIComponent(urlInfo.text)}`;
+        }
+
         console.log(`[BizzHunter-WA] Continue control detected: "${result.visibleText}" -> ${result.destinationUrl || 'default'}`);
 
         chrome.runtime.sendMessage({
@@ -155,6 +203,7 @@
 
     if (continueElement) {
       try {
+        ensureHrefCarriesText(continueElement);
         console.log('[BizzHunter-WA] User triggered Continue click on detected control');
         continueElement.click();
         sendResponse({ success: true, message: 'Continue element clicked successfully' });

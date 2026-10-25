@@ -12,11 +12,19 @@
 
   console.log('[BizzHunter-WA] WhatsApp Web detector initialized on tab');
 
+  // Capture text from URL immediately upon script load before client-side router changes URL
+  let initialUrlText = '';
+  try {
+    const urlParams = new URLSearchParams(window.location.search);
+    initialUrlText = urlParams.get('text') || '';
+  } catch {}
+
   let activeCheckInterval = null;
   let lastReportedState = null;
   let checkAttempts = 0;
   let hasEnsuredChatBox = false;
-  const MAX_CHECK_ATTEMPTS = 60; // 60 seconds of monitoring
+  let insertionAttempts = 0;
+  const MAX_CHECK_ATTEMPTS = 90; // 90 seconds of monitoring for slower connections
 
   /**
    * Ensures the message is open directly in the chat box and composer is focused with cursor at end.
@@ -24,68 +32,75 @@
   async function ensureMessageInChatBox(composerEl) {
     if (!composerEl || hasEnsuredChatBox) return;
 
-    let currentText = (composerEl.innerText || composerEl.textContent || '').trim();
+    const rawCurrent = composerEl.innerText || composerEl.textContent || '';
+    const cleanCurrent = BH.stripZeroWidth(rawCurrent);
 
-    // If chat composer doesn't have the text yet, determine expected message text
-    if (!currentText) {
-      let expectedText = '';
+    // Determine expected message text to insert
+    let expectedText = initialUrlText;
+    if (!expectedText) {
       try {
         const urlParams = new URLSearchParams(window.location.search);
         expectedText = urlParams.get('text') || '';
       } catch {}
+    }
 
-      if (!expectedText) {
-        try {
-          const res = await chrome.runtime.sendMessage({ type: BH.MessageType.GET_EXTENSION_STATE });
-          const activeTask = res && res.state && res.state.activeTaskId
-            ? res.state.tasks[res.state.activeTaskId]
-            : null;
+    if (!expectedText) {
+      try {
+        const data = await chrome.storage.local.get([
+          BH.StorageKey.PENDING_MESSAGE_TEXT,
+          BH.StorageKey.ACTIVE_TASK_ID,
+          BH.StorageKey.TASKS
+        ]);
+
+        if (data[BH.StorageKey.PENDING_MESSAGE_TEXT]) {
+          expectedText = data[BH.StorageKey.PENDING_MESSAGE_TEXT];
+        } else if (data[BH.StorageKey.ACTIVE_TASK_ID] && data[BH.StorageKey.TASKS]) {
+          const activeTask = data[BH.StorageKey.TASKS][data[BH.StorageKey.ACTIVE_TASK_ID]];
           if (activeTask && activeTask.messageText) {
             expectedText = activeTask.messageText;
           }
-        } catch {}
-      }
-
-      if (expectedText) {
-        console.log('[BizzHunter-WA] Opening message directly in chat box...');
-        composerEl.focus();
-
-        let inserted = false;
-        try {
-          inserted = document.execCommand('insertText', false, expectedText);
-        } catch {}
-
-        if (!inserted || !(composerEl.innerText || composerEl.textContent || '').trim()) {
-          composerEl.innerText = expectedText;
-          composerEl.dispatchEvent(new InputEvent('input', {
-            bubbles: true,
-            cancelable: true,
-            inputType: 'insertText',
-            data: expectedText
-          }));
-          composerEl.dispatchEvent(new Event('change', { bubbles: true }));
         }
+
+        if (!expectedText && data[BH.StorageKey.TASKS]) {
+          const taskList = Object.values(data[BH.StorageKey.TASKS]);
+          const recent = taskList.reverse().find(t => t.messageText);
+          if (recent) expectedText = recent.messageText;
+        }
+      } catch (err) {
+        console.warn('[BizzHunter-WA] Error reading storage for expected message:', err);
       }
     }
 
-    // Always focus the chat box and position cursor at the end
-    focusAndPlaceCursorAtEnd(composerEl);
-    hasEnsuredChatBox = true;
-  }
+    // If chat composer already has the expected message, focus and complete
+    if (expectedText && (cleanCurrent === expectedText || cleanCurrent.includes(expectedText))) {
+      BH.focusAndPlaceCursorAtEnd(composerEl);
+      hasEnsuredChatBox = true;
+      console.log('[BizzHunter-WA] Message is already open in chat box');
+      return;
+    }
 
-  function focusAndPlaceCursorAtEnd(el) {
-    if (!el) return;
-    try {
-      el.focus();
-      if (typeof window.getSelection !== 'undefined' && typeof document.createRange !== 'undefined') {
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        range.collapse(false);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
+    // If composer already has some non-empty user text (different from expected) and we've tried inserting
+    if (!expectedText && cleanCurrent.length > 0) {
+      BH.focusAndPlaceCursorAtEnd(composerEl);
+      hasEnsuredChatBox = true;
+      return;
+    }
+
+    if (expectedText) {
+      insertionAttempts++;
+      console.log(`[BizzHunter-WA] Opening message directly in chat box (attempt ${insertionAttempts}, msg len: ${expectedText.length})...`);
+      const inserted = BH.insertMessageIntoComposer(composerEl, expectedText);
+
+      // Verify that composer now actually contains text
+      const verifiedClean = BH.stripZeroWidth(composerEl.innerText || composerEl.textContent || '');
+      if (inserted || verifiedClean.length > 0) {
+        hasEnsuredChatBox = true;
+        console.log('[BizzHunter-WA] ✓ Message successfully opened and focused in WhatsApp chat box!');
+      } else if (insertionAttempts >= 5) {
+        // Stop retrying after 5 attempts to avoid infinite loops
+        hasEnsuredChatBox = true;
       }
-    } catch {}
+    }
   }
 
   // 1. Initial notification to background that WhatsApp Web is active
@@ -101,6 +116,14 @@
     checkAttempts++;
 
     let state = BH.inspectWhatsAppWeb(document);
+
+    // If WhatsApp Web shows "Use Here" dialog (when open in another tab/window), auto-click it
+    if (state.isUseHerePrompt && state.useHereButtonElement) {
+      console.log('[BizzHunter-WA] "Use Here" dialog detected, activating tab...');
+      try {
+        state.useHereButtonElement.click();
+      } catch {}
+    }
 
     // If chat is open and composer is found, make sure message is directly opened in the chat box!
     if (state.chatOpen && state.composerFound) {

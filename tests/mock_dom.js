@@ -30,6 +30,24 @@ class MockElement {
     this.classList = new DOMTokenList(attrs.class || '');
     this.style = {};
     this.offsetParent = {}; // indicates visible
+    this.listeners = {};
+  }
+
+  focus() {
+    this.isFocused = true;
+  }
+
+  addEventListener(type, listener) {
+    if (!this.listeners[type]) this.listeners[type] = [];
+    this.listeners[type].push(listener);
+  }
+
+  dispatchEvent(event) {
+    const list = this.listeners[event && event.type] || [];
+    for (const fn of list) {
+      fn(event);
+    }
+    return true;
   }
 
   getAttribute(name) {

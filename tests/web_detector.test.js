@@ -174,6 +174,61 @@ function runTests() {
     assert.strictEqual(after.draftText, expectedMessage);
   });
 
+  // 7. Lexical Zero-Width Spaces (\u200B)
+  test('Zero-width space in empty Lexical composer does not trigger false draft', () => {
+    const doc = new MockDocument();
+    const header = doc.createElement('header');
+    header.appendChild(doc.createElement('span', { title: '+234 703 161 5407' }, '+234 703 161 5407'));
+    doc.body.appendChild(header);
+
+    const footer = doc.createElement('footer');
+    // Simulate Meta Lexical default empty editor containing \u200B
+    const composer = doc.createElement('div', {
+      contenteditable: 'true',
+      role: 'textbox',
+      'data-lexical-editor': 'true'
+    }, '\u200B');
+    footer.appendChild(composer);
+    doc.body.appendChild(footer);
+
+    const res = BH.inspectWhatsAppWeb(doc, '2347031615407');
+    assert.strictEqual(res.chatOpen, true);
+    assert.strictEqual(res.composerFound, true);
+    assert.strictEqual(res.hasDraft, false);
+    assert.strictEqual(res.draftText, '');
+  });
+
+  // 8. Insertion into Composer with Zero-Width Placeholder
+  test('insertMessageIntoComposer replaces zero-width placeholder with outreach message', () => {
+    const doc = new MockDocument();
+    const composer = doc.createElement('div', {
+      contenteditable: 'true',
+      role: 'textbox',
+      'data-lexical-editor': 'true'
+    }, '\u200B');
+
+    const message = 'Hello from BizzHunter team';
+    const success = BH.insertMessageIntoComposer(composer, message);
+    assert.strictEqual(success, true);
+    assert.strictEqual(BH.stripZeroWidth(composer.textContent), message);
+  });
+
+  // 9. Use Here Dialog Detection
+  test('Identifies "WhatsApp is open in another window" / "Use Here" modal', () => {
+    const doc = new MockDocument();
+    const modal = doc.createElement('div', {
+      'role': 'dialog',
+      'data-animate-modal-popup': 'true'
+    }, 'WhatsApp is open in another window. Click Use Here to use WhatsApp in this window.');
+    const useHereBtn = doc.createElement('button', {}, 'Use Here');
+    modal.appendChild(useHereBtn);
+    doc.body.appendChild(modal);
+
+    const res = BH.inspectWhatsAppWeb(doc);
+    assert.strictEqual(res.isUseHerePrompt, true);
+    assert.ok(res.useHereButtonElement);
+  });
+
   return { passed, failed };
 }
 

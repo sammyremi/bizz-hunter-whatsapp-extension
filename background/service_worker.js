@@ -210,6 +210,12 @@ async function handleSendPageUrlDetected(tabId, url, urlInfo) {
     stats: state.stats
   });
 
+  if (urlInfo.text) {
+    await chrome.storage.local.set({
+      [StorageKey.PENDING_MESSAGE_TEXT]: urlInfo.text
+    });
+  }
+
   console.log(`[BizzHunter-WA] New task initialized: ${taskId} for ${urlInfo.phoneMasked}`);
 }
 
@@ -262,15 +268,57 @@ async function handleMessage(type, payload, sender) {
   switch (type) {
     // 1. Content Script: Send Page Detected
     case MessageType.SEND_PAGE_DETECTED: {
-      const { phoneNormalized, messageText } = payload;
+      const { phoneNormalized, messageText, phone, phoneMasked, textLength, textSnippet, url } = payload;
       let task = Object.values(state.tasks).find(t => t.sendTabId === senderTabId);
-      if (task) {
+      if (!task) {
+        const taskId = createTaskId(phoneNormalized || phone || 'detected');
+        task = {
+          id: taskId,
+          status: TaskStatus.LINK_DETECTED,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          sendTabId: senderTabId,
+          sendUrl: url || '',
+          phone: phone || '',
+          phoneNormalized: phoneNormalized || '',
+          phoneMasked: phoneMasked || '',
+          messageText: messageText || '',
+          expectedTextLength: textLength || (messageText ? messageText.length : 0),
+          expectedTextSnippet: textSnippet || '',
+          continueControlDetected: false,
+          continueControlReady: false,
+          continueControlText: '',
+          continueDestinationUrl: '',
+          webTabId: null,
+          webUrl: '',
+          chatDetected: false,
+          chatRecipient: '',
+          recipientVerified: false,
+          composerFound: false,
+          hasDraft: false,
+          draftSnippet: '',
+          readyAt: null,
+          errorMessage: null,
+          completedAt: null
+        };
+        state.tasks[taskId] = task;
+        state.activeTaskId = taskId;
+        state.stats.totalDetected += 1;
+      } else {
         task.status = TaskStatus.LINK_DETECTED;
-        if (messageText && !task.messageText) {
+        if (messageText) {
           task.messageText = messageText;
         }
-        await saveState({ tasks: state.tasks });
       }
+
+      await saveState({ tasks: state.tasks, activeTaskId: state.activeTaskId, stats: state.stats });
+
+      if (messageText) {
+        await chrome.storage.local.set({
+          [StorageKey.PENDING_MESSAGE_TEXT]: messageText
+        });
+      }
+
       return { success: true };
     }
 
@@ -310,8 +358,14 @@ async function handleMessage(type, payload, sender) {
         return { success: true, alreadyLinked: true };
       }
 
-      const destUrl = payload.destinationUrl || task.continueDestinationUrl;
+      let destUrl = payload.destinationUrl || task.continueDestinationUrl;
       if (destUrl && destUrl.includes('web.whatsapp.com')) {
+        // Guarantee &text= is included in URL
+        if (task.messageText && !destUrl.includes('text=')) {
+          const sep = destUrl.includes('?') ? '&' : '?';
+          destUrl = `${destUrl}${sep}text=${encodeURIComponent(task.messageText)}`;
+        }
+
         console.log(`[BizzHunter-WA] Auto-continue fallback: opening WhatsApp Web tab directly (${destUrl})`);
         const newTab = await chrome.tabs.create({ url: destUrl, active: true });
         task.webTabId = newTab.id;
@@ -416,8 +470,14 @@ async function handleMessage(type, payload, sender) {
       } catch (err) {
         // If content script direct messaging fails, open destination or fallback navigation
         if (task.continueDestinationUrl && task.continueDestinationUrl.startsWith('https://web.whatsapp.com')) {
-          const newTab = await chrome.tabs.create({ url: task.continueDestinationUrl });
+          let destUrl = task.continueDestinationUrl;
+          if (task.messageText && !destUrl.includes('text=')) {
+            const sep = destUrl.includes('?') ? '&' : '?';
+            destUrl = `${destUrl}${sep}text=${encodeURIComponent(task.messageText)}`;
+          }
+          const newTab = await chrome.tabs.create({ url: destUrl });
           task.webTabId = newTab.id;
+          task.webUrl = destUrl;
           await saveState({ tasks: state.tasks });
           return { success: true, message: 'Opened WhatsApp Web tab directly' };
         }

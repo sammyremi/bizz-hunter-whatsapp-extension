@@ -322,6 +322,17 @@
       }
     }
 
+    // Check "Use Here" dialog (when WhatsApp is open in another window)
+    const useHereModal = doc.querySelector('div[data-animate-modal-popup="true"], div[role="dialog"]');
+    if (useHereModal) {
+      const modalText = useHereModal.textContent || '';
+      if (modalText.includes('open in another window') || modalText.includes('Use Here')) {
+        const useHereBtn = useHereModal.querySelector('button, div[role="button"]');
+        result.isUseHerePrompt = true;
+        result.useHereButtonElement = useHereBtn;
+      }
+    }
+
     // Main App Container check
     const appEl = doc.getElementById('app') || doc.querySelector('#main, [data-testid="conversation-panel-wrapper"], div[role="region"]');
     if (appEl) {
@@ -330,16 +341,18 @@
 
     // Detect Conversation Header and Recipient
     // WhatsApp Web puts the active chat header inside a <header> element or [data-testid="conversation-header"]
-    const header = doc.querySelector('#main header, [data-testid="conversation-header"], header[data-testid="chat-header"], header');
-    if (header) {
+    const header = doc.querySelector('#main header, [data-testid="conversation-header"], header[data-testid="chat-header"]');
+    const safeHeader = header || Array.from(doc.querySelectorAll('header')).find(h => !h.closest || !h.closest('#side'));
+
+    if (safeHeader) {
       result.chatOpen = true;
 
       // Extract recipient text from header title/spans
-      const titleSpan = header.querySelector('span[title], div[role="button"] span[dir="auto"], span._ao3e');
+      const titleSpan = safeHeader.querySelector('span[title], div[role="button"] span[dir="auto"], span._ao3e');
       if (titleSpan) {
         result.recipientText = (titleSpan.getAttribute('title') || titleSpan.textContent || '').trim();
       } else {
-        const anySpan = header.querySelector('span[dir="auto"]');
+        const anySpan = safeHeader.querySelector('span[dir="auto"]');
         if (anySpan) {
           result.recipientText = (anySpan.textContent || '').trim();
         }
@@ -361,22 +374,36 @@
     }
 
     // Detect Message Composer
-    // Crucial rule: Message composer is in the <footer> or bottom composer container.
-    // It is contenteditable="true" and role="textbox" (or data-tab="10").
-    // We explicitly avoid querying message history bubbles in #main!
-    const footer = doc.querySelector('#main footer, [data-testid="conversation-panel-wrapper"] footer, footer');
+    // Crucial rule: Message composer is in the active chat container (#main or footer).
+    // Supports Lexical editor (data-lexical-editor="true"), data-tab="10", role="textbox".
+    // Explicitly avoids search input in sidebar (#side / data-tab="3") and message bubbles.
     let composer = null;
+    const mainArea = doc.getElementById('main') || doc.querySelector('[data-testid="conversation-panel-wrapper"]');
 
-    if (footer) {
-      composer = footer.querySelector('div[contenteditable="true"][role="textbox"], div[contenteditable="true"][data-tab="10"], div[contenteditable="true"]');
-    } else {
-      // Fallback: search for contenteditable textbox that is NOT inside message history list
-      const candidateTextboxes = Array.from(doc.querySelectorAll('div[contenteditable="true"][role="textbox"]'));
+    if (mainArea) {
+      composer = mainArea.querySelector(
+        'div[contenteditable="true"][data-lexical-editor="true"], ' +
+        'div[contenteditable="true"][data-tab="10"], ' +
+        'div[contenteditable="true"][role="textbox"], ' +
+        'footer div[contenteditable="true"], ' +
+        'div[contenteditable="true"]'
+      );
+    }
+
+    if (!composer) {
+      const footer = doc.querySelector('#main footer, [data-testid="conversation-panel-wrapper"] footer, footer');
+      if (footer && (!footer.closest || !footer.closest('#side'))) {
+        composer = footer.querySelector('div[contenteditable="true"]');
+      }
+    }
+
+    if (!composer) {
+      const candidateTextboxes = Array.from(doc.querySelectorAll('div[contenteditable="true"]'));
       for (const tb of candidateTextboxes) {
-        // Ensure it's not a message bubble or search input
-        if (!tb.closest('[data-testid="conversation-panel-messages"]') &&
-            !tb.closest('[data-testid="chat-list-search"]') &&
-            !tb.closest('[data-tab="3"]')) {
+        if ((!tb.closest || !tb.closest('#side')) &&
+            (!tb.closest || !tb.closest('[data-testid="chat-list-search"]')) &&
+            (!tb.closest || !tb.closest('[data-tab="3"]')) &&
+            (!tb.closest || !tb.closest('[data-testid="conversation-panel-messages"]'))) {
           composer = tb;
           break;
         }
@@ -386,24 +413,22 @@
     if (composer && isElementVisible(composer)) {
       result.composerFound = true;
       result.composerElement = composer;
+      result.chatOpen = true; // Composer in chat confirms chat is open
 
-      // Extract text content safely from the composer
-      // In WhatsApp Web, text can be inside spans with class selectable-text copyable-text or plain text
-      const composerText = (composer.innerText || composer.textContent || '').trim();
-      // Filter out any zero-width or placeholder characters (e.g. \uFEFF or \u200B)
-      const cleanDraft = composerText.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+      // Extract text content safely from the composer, stripping zero-width spaces
+      const composerText = composer.innerText || composer.textContent || '';
+      const cleanDraft = stripZeroWidth(composerText);
 
       result.draftText = cleanDraft;
       result.hasDraft = cleanDraft.length > 0;
 
-      // Detect Send Button in footer
-      const sendBtn = (footer || doc).querySelector(
-        'button[data-testid="compose-btn-send"], [data-icon="send"]'
+      // Detect Send Button
+      const sendBtn = (mainArea || doc).querySelector(
+        'button[data-testid="compose-btn-send"], [data-icon="send"], button span[data-icon="send"]'
       );
 
       if (sendBtn) {
         result.sendButtonFound = true;
-        // If the selector matched the icon, grab the parent button
         result.sendButtonElement = sendBtn.tagName.toLowerCase() === 'button'
           ? sendBtn
           : sendBtn.closest('button') || sendBtn;
@@ -413,11 +438,178 @@
     return result;
   }
 
+  /**
+   * Helper to strip zero-width spaces and control characters from text strings.
+   * @param {string} str
+   * @returns {string}
+   */
+  function stripZeroWidth(str) {
+    if (!str) return '';
+    return str.replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  }
+
+  /**
+   * Focuses an element and places the caret selection at the very end.
+   * @param {Element} el
+   */
+  function focusAndPlaceCursorAtEnd(el) {
+    if (!el) return;
+    try {
+      const doc = el.ownerDocument || document;
+      const win = doc.defaultView || (typeof window !== 'undefined' ? window : null);
+      if (win && typeof win.focus === 'function') win.focus();
+      el.focus();
+
+      if (win && win.getSelection && doc.createRange) {
+        const sel = win.getSelection();
+        const range = doc.createRange();
+        const textTarget = el.querySelector('span[data-lexical-text="true"]') || el.querySelector('p') || el;
+        range.selectNodeContents(textTarget);
+        range.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    } catch {}
+  }
+
+  /**
+   * Inserts text directly into WhatsApp Web's Lexical composer.
+   * Utilizes execCommand('insertText') (which triggers native Chromium beforeinput events that Lexical listens to),
+   * followed by synthetic InputEvents and paste fallbacks.
+   *
+   * @param {Element} composerEl - contenteditable element
+   * @param {string} messageText - text to insert
+   * @returns {boolean} - true if text was successfully inserted
+   */
+  function insertMessageIntoComposer(composerEl, messageText) {
+    if (!composerEl || !messageText) return false;
+
+    // Check if composer already contains the exact message or part of it
+    const initialRaw = composerEl.innerText || composerEl.textContent || '';
+    const initialClean = stripZeroWidth(initialRaw);
+    if (initialClean === messageText || initialClean.includes(messageText)) {
+      focusAndPlaceCursorAtEnd(composerEl);
+      return true;
+    }
+
+    const doc = composerEl.ownerDocument || document;
+    const win = doc.defaultView || (typeof window !== 'undefined' ? window : null);
+
+    // 1. Focus the window and the composer element
+    try {
+      if (win && typeof win.focus === 'function') win.focus();
+      composerEl.focus();
+    } catch {}
+
+    // 2. Position cursor range inside the editor
+    if (win && win.getSelection && doc.createRange) {
+      try {
+        const sel = win.getSelection();
+        const range = doc.createRange();
+        const p = composerEl.querySelector('p') || composerEl;
+        range.selectNodeContents(p);
+        range.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      } catch {}
+    }
+
+    // 3. Strategy 1: document.execCommand('insertText', false, messageText)
+    // In Chromium, execCommand on a focused contenteditable triggers a trusted native
+    // 'beforeinput' event with inputType 'insertText', which Meta Lexical binds to directly.
+    if (doc && typeof doc.execCommand === 'function') {
+      try {
+        doc.execCommand('insertText', false, messageText);
+      } catch (err) {
+        console.warn('[BizzHunter-WA] execCommand insertText error:', err);
+      }
+    }
+
+    // Verify if Strategy 1 populated the text
+    let currentClean = stripZeroWidth(composerEl.innerText || composerEl.textContent || '');
+
+    // 4. Strategy 2: Synthetic InputEvent pipeline (beforeinput + input)
+    if (!currentClean || currentClean.length === 0) {
+      try {
+        if (typeof InputEvent !== 'undefined' && typeof composerEl.dispatchEvent === 'function') {
+          composerEl.dispatchEvent(new InputEvent('beforeinput', {
+            bubbles: true,
+            cancelable: true,
+            inputType: 'insertText',
+            data: messageText
+          }));
+        }
+
+        // Direct DOM structure reinforcement for Lexical:
+        let p = composerEl.querySelector('p');
+        if (!p) {
+          p = doc.createElement('p');
+          p.className = 'selectable-text copyable-text';
+          composerEl.appendChild(p);
+        }
+
+        let span = p.querySelector('span[data-lexical-text="true"]') || p.querySelector('span');
+        if (!span) {
+          span = doc.createElement('span');
+          span.setAttribute('data-lexical-text', 'true');
+          p.appendChild(span);
+        }
+        span.textContent = messageText;
+        p.textContent = messageText;
+        composerEl.textContent = messageText;
+        composerEl.innerText = messageText;
+
+        if (typeof InputEvent !== 'undefined' && typeof composerEl.dispatchEvent === 'function') {
+          composerEl.dispatchEvent(new InputEvent('input', {
+            bubbles: true,
+            cancelable: true,
+            inputType: 'insertText',
+            data: messageText
+          }));
+        }
+        if (typeof Event !== 'undefined' && typeof composerEl.dispatchEvent === 'function') {
+          composerEl.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      } catch (err) {
+        console.warn('[BizzHunter-WA] InputEvent fallback error:', err);
+      }
+    }
+
+    // 5. Strategy 3: ClipboardEvent 'paste' fallback
+    currentClean = stripZeroWidth(composerEl.innerText || composerEl.textContent || '');
+    if ((!currentClean || currentClean.length === 0) && typeof ClipboardEvent !== 'undefined' && typeof DataTransfer !== 'undefined') {
+      try {
+        const dt = new DataTransfer();
+        dt.setData('text/plain', messageText);
+        const pasteEvent = new ClipboardEvent('paste', {
+          clipboardData: dt,
+          bubbles: true,
+          cancelable: true
+        });
+        if (typeof composerEl.dispatchEvent === 'function') {
+          composerEl.dispatchEvent(pasteEvent);
+        }
+      } catch (err) {
+        console.warn('[BizzHunter-WA] DataTransfer paste error:', err);
+      }
+    }
+
+    // 6. Caret adjustment: focus and collapse selection to the very end of the message
+    focusAndPlaceCursorAtEnd(composerEl);
+
+    // Final check
+    const finalClean = stripZeroWidth(composerEl.innerText || composerEl.textContent || '');
+    return finalClean.length > 0;
+  }
+
   return {
     isElementVisible,
     normalizeText,
+    stripZeroWidth,
+    focusAndPlaceCursorAtEnd,
     detectContinueControl,
     observeContinueControl,
-    inspectWhatsAppWeb
+    inspectWhatsAppWeb,
+    insertMessageIntoComposer
   };
 });
