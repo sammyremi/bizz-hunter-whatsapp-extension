@@ -12,93 +12,114 @@
 
   console.log('[BizzHunter-WA] WhatsApp Web detector initialized on tab');
 
-  // Capture text from URL immediately upon script load before client-side router changes URL
+  // Capture text and phone from URL immediately upon script load before client-side router changes URL
   let initialUrlText = '';
+  let initialUrlPhone = '';
   try {
     const urlParams = new URLSearchParams(window.location.search);
     initialUrlText = urlParams.get('text') || '';
+    initialUrlPhone = urlParams.get('phone') || '';
   } catch {}
 
   let activeCheckInterval = null;
   let lastReportedState = null;
   let checkAttempts = 0;
-  let hasEnsuredChatBox = false;
+  let hasDraftedMessage = false;
   let insertionAttempts = 0;
+  let readyTicksWithoutChat = 0;
+  let hasNavigatedToRecipientChat = false;
   const MAX_CHECK_ATTEMPTS = 90; // 90 seconds of monitoring for slower connections
 
   /**
-   * Ensures the message is open directly in the chat box and composer is focused with cursor at end.
+   * Retrieves expected recipient phone and message text from URL or local storage.
    */
-  async function ensureMessageInChatBox(composerEl) {
-    if (!composerEl || hasEnsuredChatBox) return;
+  async function getExpectedTaskInfo() {
+    let phone = initialUrlPhone;
+    let text = initialUrlText;
 
-    const rawCurrent = composerEl.innerText || composerEl.textContent || '';
-    const cleanCurrent = BH.stripZeroWidth(rawCurrent);
-
-    // Determine expected message text to insert
-    let expectedText = initialUrlText;
-    if (!expectedText) {
-      try {
-        const urlParams = new URLSearchParams(window.location.search);
-        expectedText = urlParams.get('text') || '';
-      } catch {}
-    }
-
-    if (!expectedText) {
+    if (!phone || !text) {
       try {
         const data = await chrome.storage.local.get([
           BH.StorageKey.PENDING_MESSAGE_TEXT,
+          BH.StorageKey.PENDING_PHONE,
           BH.StorageKey.ACTIVE_TASK_ID,
           BH.StorageKey.TASKS
         ]);
 
-        if (data[BH.StorageKey.PENDING_MESSAGE_TEXT]) {
-          expectedText = data[BH.StorageKey.PENDING_MESSAGE_TEXT];
-        } else if (data[BH.StorageKey.ACTIVE_TASK_ID] && data[BH.StorageKey.TASKS]) {
-          const activeTask = data[BH.StorageKey.TASKS][data[BH.StorageKey.ACTIVE_TASK_ID]];
-          if (activeTask && activeTask.messageText) {
-            expectedText = activeTask.messageText;
-          }
+        if (!text && data[BH.StorageKey.PENDING_MESSAGE_TEXT]) {
+          text = data[BH.StorageKey.PENDING_MESSAGE_TEXT];
+        }
+        if (!phone && data[BH.StorageKey.PENDING_PHONE]) {
+          phone = data[BH.StorageKey.PENDING_PHONE];
         }
 
-        if (!expectedText && data[BH.StorageKey.TASKS]) {
-          const taskList = Object.values(data[BH.StorageKey.TASKS]);
-          const recent = taskList.reverse().find(t => t.messageText);
-          if (recent) expectedText = recent.messageText;
+        const activeId = data[BH.StorageKey.ACTIVE_TASK_ID];
+        const activeTask = activeId && data[BH.StorageKey.TASKS] ? data[BH.StorageKey.TASKS][activeId] : null;
+
+        if (activeTask) {
+          if (!phone) phone = activeTask.phoneNormalized || activeTask.phone || '';
+          if (!text) text = activeTask.messageText || '';
+        }
+
+        if ((!phone || !text) && data[BH.StorageKey.TASKS]) {
+          const list = Object.values(data[BH.StorageKey.TASKS]);
+          const recent = list.reverse().find(t => t.phoneNormalized || t.messageText);
+          if (recent) {
+            if (!phone) phone = recent.phoneNormalized || recent.phone || '';
+            if (!text) text = recent.messageText || '';
+          }
         }
       } catch (err) {
-        console.warn('[BizzHunter-WA] Error reading storage for expected message:', err);
+        console.warn('[BizzHunter-WA] Error reading task info from storage:', err);
       }
     }
 
-    // If chat composer already has the expected message, focus and complete
+    return { expectedPhone: phone, expectedText: text };
+  }
+
+  /**
+   * Ensures the message is open directly in the chat box and composer is focused with cursor at end.
+   * Only runs when the recipient is verified!
+   */
+  async function ensureMessageInChatBox(composerEl, expectedText, expectedPhone, recipientVerified) {
+    if (!composerEl) return;
+
+    // Critical Requirement 4: Verify that the active chat matches the intended recipient
+    // before populating the composer!
+    if (expectedPhone && !recipientVerified) {
+      console.log(`[BizzHunter-WA] Waiting for intended recipient (${expectedPhone}) before drafting...`);
+      return;
+    }
+
+    const rawCurrent = composerEl.innerText || composerEl.textContent || '';
+    const cleanCurrent = BH.stripZeroWidth(rawCurrent);
+
+    // If chat composer already has the expected message:
     if (expectedText && (cleanCurrent === expectedText || cleanCurrent.includes(expectedText))) {
       BH.focusAndPlaceCursorAtEnd(composerEl);
-      hasEnsuredChatBox = true;
-      console.log('[BizzHunter-WA] Message is already open in chat box');
+      hasDraftedMessage = true;
+      console.log('[BizzHunter-WA] Message confirmed drafted in chat box');
       return;
     }
 
-    // If composer already has some non-empty user text (different from expected) and we've tried inserting
-    if (!expectedText && cleanCurrent.length > 0) {
-      BH.focusAndPlaceCursorAtEnd(composerEl);
-      hasEnsuredChatBox = true;
+    // Do not repeatedly overwrite the user's edits once the message has been successfully drafted
+    if (hasDraftedMessage) {
       return;
     }
 
-    if (expectedText) {
+    // If the composer is empty and we have an expected message to insert
+    if (expectedText && cleanCurrent.length === 0) {
       insertionAttempts++;
-      console.log(`[BizzHunter-WA] Opening message directly in chat box (attempt ${insertionAttempts}, msg len: ${expectedText.length})...`);
+      console.log(`[BizzHunter-WA] Populating message into composer (attempt ${insertionAttempts}, length: ${expectedText.length})...`);
       const inserted = BH.insertMessageIntoComposer(composerEl, expectedText);
 
-      // Verify that composer now actually contains text
+      // Verify that composer now actually contains the expected text
       const verifiedClean = BH.stripZeroWidth(composerEl.innerText || composerEl.textContent || '');
-      if (inserted || verifiedClean.length > 0) {
-        hasEnsuredChatBox = true;
-        console.log('[BizzHunter-WA] ✓ Message successfully opened and focused in WhatsApp chat box!');
+      if (inserted || verifiedClean === expectedText || verifiedClean.includes(expectedText)) {
+        hasDraftedMessage = true;
+        console.log('[BizzHunter-WA] ✓ Message successfully drafted and focused in WhatsApp chat box!');
       } else if (insertionAttempts >= 5) {
-        // Stop retrying after 5 attempts to avoid infinite loops
-        hasEnsuredChatBox = true;
+        console.warn('[BizzHunter-WA] Reached max insertion attempts for composer');
       }
     }
   }
@@ -115,9 +136,13 @@
   async function runStateInspection() {
     checkAttempts++;
 
-    let state = BH.inspectWhatsAppWeb(document);
+    // 1. Retrieve expected task details (phone and text)
+    const { expectedPhone, expectedText } = await getExpectedTaskInfo();
 
-    // If WhatsApp Web shows "Use Here" dialog (when open in another tab/window), auto-click it
+    // 2. Inspect WhatsApp Web DOM with expectedPhone for recipient matching
+    let state = BH.inspectWhatsAppWeb(document, expectedPhone);
+
+    // 3. If WhatsApp Web shows "Use Here" dialog (when open in another tab/window), auto-click it
     if (state.isUseHerePrompt && state.useHereButtonElement) {
       console.log('[BizzHunter-WA] "Use Here" dialog detected, activating tab...');
       try {
@@ -125,11 +150,46 @@
       } catch {}
     }
 
-    // If chat is open and composer is found, make sure message is directly opened in the chat box!
+    // 4. If chat is open and composer is found, make sure message is directly opened in the chat box!
     if (state.chatOpen && state.composerFound) {
-      await ensureMessageInChatBox(state.composerElement);
+      await ensureMessageInChatBox(state.composerElement, expectedText, expectedPhone, state.recipientVerified);
       // Re-inspect to capture newly inserted draft
-      state = BH.inspectWhatsAppWeb(document);
+      state = BH.inspectWhatsAppWeb(document, expectedPhone);
+    }
+
+    // 5. Requirement 7: Open recipient chat ONLY if NO conversation or composer is active.
+    // If WhatsApp Web is ready but NO chat or composer is open at all, navigate to recipient send URL ONCE.
+    // Under NO circumstance reload or navigate if chat is already open, composer is found, or draft is present!
+    const isWebReady = state.isAppLoaded && !state.isConnecting && !state.isQrScreen && !state.isInvalidNumber;
+    const isAnyChatActive = state.chatOpen || state.composerFound || state.hasDraft || hasDraftedMessage;
+
+    if (isAnyChatActive) {
+      readyTicksWithoutChat = 0;
+    } else if (isWebReady && expectedPhone) {
+      readyTicksWithoutChat++;
+      const navSessionKey = `bh_nav_attempt_${expectedPhone}`;
+      let alreadyAttemptedNav = false;
+      try {
+        alreadyAttemptedNav = (typeof sessionStorage !== 'undefined' && sessionStorage.getItem(navSessionKey) === 'true') || hasNavigatedToRecipientChat;
+      } catch {}
+
+      if (readyTicksWithoutChat >= 3 && !alreadyAttemptedNav) {
+        hasNavigatedToRecipientChat = true;
+        try {
+          if (typeof sessionStorage !== 'undefined') {
+            sessionStorage.setItem(navSessionKey, 'true');
+          }
+        } catch {}
+
+        const currentUrl = window.location.href;
+        const alreadyOnRecipientUrl = currentUrl.includes('/send') && currentUrl.includes(expectedPhone);
+        if (!alreadyOnRecipientUrl) {
+          const recipientSendUrl = BH.buildWhatsAppWebSendUrl(expectedPhone, expectedText);
+          console.log(`[BizzHunter-WA] No active chat detected. Navigating once to recipient-specific URL: ${recipientSendUrl}`);
+          window.location.href = recipientSendUrl;
+          return;
+        }
+      }
     }
 
     // Prepare safe summary
@@ -141,6 +201,7 @@
       invalidNumberMessage: state.invalidNumberMessage,
       chatOpen: state.chatOpen,
       recipientText: state.recipientText,
+      recipientVerified: state.recipientVerified,
       composerFound: state.composerFound,
       hasDraft: state.hasDraft,
       draftLength: state.draftText ? state.draftText.length : 0,
@@ -155,6 +216,7 @@
       inv: summary.isInvalidNumber,
       chat: summary.chatOpen,
       rec: summary.recipientText,
+      ver: summary.recipientVerified,
       draft: summary.hasDraft,
       btn: summary.sendButtonFound
     });

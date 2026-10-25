@@ -210,10 +210,11 @@ async function handleSendPageUrlDetected(tabId, url, urlInfo) {
     stats: state.stats
   });
 
-  if (urlInfo.text) {
-    await chrome.storage.local.set({
-      [StorageKey.PENDING_MESSAGE_TEXT]: urlInfo.text
-    });
+  const pendingSync = {};
+  if (urlInfo.text) pendingSync[StorageKey.PENDING_MESSAGE_TEXT] = urlInfo.text;
+  if (urlInfo.phoneNormalized) pendingSync[StorageKey.PENDING_PHONE] = urlInfo.phoneNormalized;
+  if (Object.keys(pendingSync).length > 0) {
+    await chrome.storage.local.set(pendingSync);
   }
 
   console.log(`[BizzHunter-WA] New task initialized: ${taskId} for ${urlInfo.phoneMasked}`);
@@ -313,10 +314,11 @@ async function handleMessage(type, payload, sender) {
 
       await saveState({ tasks: state.tasks, activeTaskId: state.activeTaskId, stats: state.stats });
 
-      if (messageText) {
-        await chrome.storage.local.set({
-          [StorageKey.PENDING_MESSAGE_TEXT]: messageText
-        });
+      const pendingSync = {};
+      if (messageText) pendingSync[StorageKey.PENDING_MESSAGE_TEXT] = messageText;
+      if (phoneNormalized) pendingSync[StorageKey.PENDING_PHONE] = phoneNormalized;
+      if (Object.keys(pendingSync).length > 0) {
+        await chrome.storage.local.set(pendingSync);
       }
 
       return { success: true };
@@ -346,36 +348,36 @@ async function handleMessage(type, payload, sender) {
       return { success: true };
     }
 
-    // 2b. Content Script: Fallback Ensure Navigation (bypasses Brave popup blocker)
+    // 2b. Content Script: Open detected Continue destination in a new tab
     case MessageType.ENSURE_WEB_NAVIGATION: {
       let task = Object.values(state.tasks).find(t => t.sendTabId === senderTabId) ||
                  (state.activeTaskId ? state.tasks[state.activeTaskId] : null);
 
       if (!task) return { success: false, reason: 'No matching task' };
 
-      // If WhatsApp Web tab is already opened and registered, nothing more to do
+      // If WhatsApp Web tab is already opened and registered, prevent duplicate tabs
       if (task.webTabId) {
         return { success: true, alreadyLinked: true };
       }
 
-      let destUrl = payload.destinationUrl || task.continueDestinationUrl;
-      if (destUrl && destUrl.includes('web.whatsapp.com')) {
-        // Guarantee &text= is included in URL
-        if (task.messageText && !destUrl.includes('text=')) {
-          const sep = destUrl.includes('?') ? '&' : '?';
-          destUrl = `${destUrl}${sep}text=${encodeURIComponent(task.messageText)}`;
+      let destUrl = payload.destinationUrl || task.continueDestinationUrl || 'https://web.whatsapp.com/';
+      if (destUrl.startsWith('//')) {
+        destUrl = `https:${destUrl}`;
+      } else if (!destUrl.startsWith('http://') && !destUrl.startsWith('https://')) {
+        try {
+          destUrl = new URL(destUrl, 'https://web.whatsapp.com').href;
+        } catch {
+          destUrl = 'https://web.whatsapp.com/';
         }
-
-        console.log(`[BizzHunter-WA] Auto-continue fallback: opening WhatsApp Web tab directly (${destUrl})`);
-        const newTab = await chrome.tabs.create({ url: destUrl, active: true });
-        task.webTabId = newTab.id;
-        task.webUrl = destUrl;
-        task.status = TaskStatus.WAITING_FOR_WEB;
-        await saveState({ tasks: state.tasks });
-        return { success: true, createdTabId: newTab.id };
       }
 
-      return { success: false, reason: 'No valid destination URL' };
+      console.log(`[BizzHunter-WA] Opening detected Continue destination in new tab: ${destUrl}`);
+      const newTab = await chrome.tabs.create({ url: destUrl, active: true });
+      task.webTabId = newTab.id;
+      task.webUrl = destUrl;
+      task.status = TaskStatus.WAITING_FOR_WEB;
+      await saveState({ tasks: state.tasks });
+      return { success: true, createdTabId: newTab.id };
     }
 
     // 3. Content Script: WhatsApp Web Page Detected
@@ -403,7 +405,9 @@ async function handleMessage(type, payload, sender) {
       task.draftSnippet = payload.draftSnippet || '';
 
       // Match recipient
-      if (task.phoneNormalized && payload.recipientText) {
+      if (payload.recipientVerified !== undefined) {
+        task.recipientVerified = payload.recipientVerified;
+      } else if (task.phoneNormalized && payload.recipientText) {
         const cleanRec = payload.recipientText.replace(/[^0-9]/g, '');
         const cleanExpected = task.phoneNormalized;
         task.recipientVerified = cleanRec.length >= 7 &&

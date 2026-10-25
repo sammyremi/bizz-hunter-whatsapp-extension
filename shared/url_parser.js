@@ -173,12 +173,32 @@
     }
   }
 
+  /**
+   * Constructs a supported recipient-specific WhatsApp Web send URL.
+   * Preserves exact phone and text parameters without double-decoding or truncation.
+   * e.g., https://web.whatsapp.com/send/?phone=234...&text=...
+   * @param {string} phone
+   * @param {string} text
+   * @returns {string}
+   */
+  function buildWhatsAppWebSendUrl(phone, text) {
+    const cleanPhone = normalizePhoneNumber(phone);
+    if (!cleanPhone) return 'https://web.whatsapp.com/';
+    const url = new URL('https://web.whatsapp.com/send/');
+    url.searchParams.set('phone', cleanPhone);
+    if (text) {
+      url.searchParams.set('text', text);
+    }
+    return url.toString();
+  }
+
   return {
     normalizePhoneNumber,
     maskPhoneNumber,
     summarizeMessage,
     isValidPhoneNumber,
     parseWhatsAppUrl,
-    isWhatsAppWebUrl
+    isWhatsAppWebUrl,
+    buildWhatsAppWebSendUrl
   };
 });

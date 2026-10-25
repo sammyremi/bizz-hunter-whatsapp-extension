@@ -57,6 +57,7 @@
     TASKS: 'bh_tasks',
     ACTIVE_TASK_ID: 'bh_active_task_id',
     PENDING_MESSAGE_TEXT: 'bh_pending_message_text',
+    PENDING_PHONE: 'bh_pending_phone',
     SETTINGS: 'bh_settings',
     STATS: 'bh_stats'
   });

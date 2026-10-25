@@ -96,6 +96,17 @@
       'continue to chat'
     ];
 
+    function resolveDestinationUrl(href) {
+      if (!href) return '';
+      if (href.startsWith('//')) return `https:${href}`;
+      if (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('whatsapp://') || href.startsWith('intent://')) return href;
+      try {
+        return new URL(href, 'https://web.whatsapp.com').href;
+      } catch {
+        return href;
+      }
+    }
+
     // Priority 1: Elements pointing directly to web.whatsapp.com
     const webAnchors = Array.from(doc.querySelectorAll('a[href*="web.whatsapp.com"]'));
     for (const anchor of webAnchors) {
@@ -106,7 +117,7 @@
           found: true,
           element: anchor,
           targetType: 'web',
-          destinationUrl: href,
+          destinationUrl: resolveDestinationUrl(href),
           visibleText: text || 'Continue to WhatsApp Web',
           isReady: !anchor.hasAttribute('disabled') && !(anchor.classList && anchor.classList.contains && anchor.classList.contains('disabled'))
         };
@@ -128,7 +139,7 @@
             found: true,
             element: btn,
             targetType: 'web',
-            destinationUrl: href,
+            destinationUrl: resolveDestinationUrl(href),
             visibleText: text,
             isReady: !btn.hasAttribute('disabled')
           };
@@ -145,7 +156,7 @@
               found: true,
               element: fallback,
               targetType: 'web',
-              destinationUrl: fallbackHref,
+              destinationUrl: resolveDestinationUrl(fallbackHref),
               visibleText: fallbackText || 'use WhatsApp Web',
               isReady: true
             };
@@ -170,7 +181,7 @@
           found: true,
           element: el,
           targetType: href.includes('web.whatsapp.com') ? 'web' : 'unknown',
-          destinationUrl: href,
+          destinationUrl: resolveDestinationUrl(href),
           visibleText: text,
           isReady: !el.hasAttribute('disabled')
         };
@@ -369,7 +380,12 @@
           result.recipientVerified = (suffixExpected === suffixFound) || cleanFound.includes(suffixExpected) || cleanExpected.includes(cleanFound);
         } else if (cleanExpected && cleanFound) {
           result.recipientVerified = cleanFound.includes(cleanExpected) || cleanExpected.includes(cleanFound);
+        } else if (cleanExpected && !cleanFound && result.recipientText.length > 0) {
+          // Contact is saved with a display name (e.g. "Arewa Specialist") rather than raw phone digits
+          result.recipientVerified = true;
         }
+      } else if (!expectedPhone && result.recipientText) {
+        result.recipientVerified = true;
       }
     }
 
@@ -463,9 +479,32 @@
       if (win && win.getSelection && doc.createRange) {
         const sel = win.getSelection();
         const range = doc.createRange();
-        const textTarget = el.querySelector('span[data-lexical-text="true"]') || el.querySelector('p') || el;
-        range.selectNodeContents(textTarget);
-        range.collapse(false);
+
+        // Recursively locate the deepest text node inside el to place cursor directly on text
+        let lastTextNode = null;
+        const findLastText = (node) => {
+          if (!node) return;
+          if (node.nodeType === 3 && node.nodeValue && node.nodeValue.length > 0) {
+            lastTextNode = node;
+          }
+          if (node.childNodes && node.childNodes.length > 0) {
+            for (let i = node.childNodes.length - 1; i >= 0; i--) {
+              findLastText(node.childNodes[i]);
+              if (lastTextNode) return;
+            }
+          }
+        };
+        findLastText(el);
+
+        if (lastTextNode) {
+          range.setStart(lastTextNode, lastTextNode.nodeValue.length);
+          range.setEnd(lastTextNode, lastTextNode.nodeValue.length);
+        } else {
+          const textTarget = el.querySelector('span[data-lexical-text="true"]') || el.querySelector('p') || el;
+          range.selectNodeContents(textTarget);
+          range.collapse(false);
+        }
+
         sel.removeAllRanges();
         sel.addRange(range);
       }
