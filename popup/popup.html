@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bizz-Hunter WhatsApp Assistant</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="logo-area">
+        <div class="logo-badge">BH</div>
+        <div class="header-titles">
+          <h1>Bizz-Hunter</h1>
+          <span class="sub-title">WhatsApp Outreach Assistant</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="pauseResumeBtn" class="btn-icon" title="Pause / Resume Assistant" aria-label="Pause or Resume">
+          <span id="pauseIcon">⏸️</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Global Status Banner -->
+    <section class="status-banner" id="statusBanner">
+      <div class="status-indicator">
+        <span class="status-dot" id="statusDot"></span>
+        <span class="status-label" id="statusLabel">Idle</span>
+      </div>
+      <div class="status-meta">
+        <span class="tab-badge" id="matchingTabsBadge">0 Active Tabs</span>
+      </div>
+    </section>
+
+    <!-- Error Alert Box -->
+    <div class="alert-box error-alert" id="errorBox" style="display: none;">
+      <div class="alert-icon">⚠️</div>
+      <div class="alert-content">
+        <div class="alert-title">Task Issue Detected</div>
+        <div class="alert-message" id="errorMessage">An unexpected error occurred.</div>
+      </div>
+      <button class="alert-dismiss" id="dismissErrorBtn" title="Dismiss">✕</button>
+    </div>
+
+    <!-- Active Task Card -->
+    <main class="task-card" id="taskCard">
+      <div class="card-header">
+        <span class="card-title">CURRENT OUTREACH TASK</span>
+        <span class="task-id-badge" id="taskIdBadge">None</span>
+      </div>
+
+      <div class="task-details" id="taskDetailsArea">
+        <div class="detail-row">
+          <span class="detail-key">Recipient</span>
+          <span class="detail-value highlight" id="taskRecipient">—</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-key">Draft Message</span>
+          <span class="detail-value" id="taskDraftPreview">No active draft</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-key">Continue Button</span>
+          <span class="detail-value status-pill" id="taskContinueState">Waiting</span>
+        </div>
+        <div class="detail-row">
+          <span class="detail-key">Chat Readiness</span>
+          <span class="detail-value status-pill" id="taskChatState">Waiting</span>
+        </div>
+
+        <!-- Readiness Countdown Progress -->
+        <div class="readiness-progress-container" id="readinessProgressArea" style="display: none;">
+          <div class="progress-labels">
+            <span>Readiness Safeguard</span>
+            <span id="countdownTimer">12s</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-bar" id="progressBar"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Action Buttons -->
+      <div class="action-buttons-group">
+        <button id="btnContinueAction" class="btn btn-primary" disabled>
+          <span>👉</span> Continue to WhatsApp Web
+        </button>
+        <button id="btnSendAction" class="btn btn-success" disabled>
+          <span>🚀</span> Send Verified Message
+        </button>
+        <button id="btnFocusWebTab" class="btn btn-secondary" style="display: none;">
+          <span>🔍</span> Focus WhatsApp Web Tab
+        </button>
+      </div>
+    </main>
+
+    <!-- Settings Collapsible Section -->
+    <section class="settings-card">
+      <div class="settings-header" id="toggleSettingsBtn">
+        <span class="settings-title">Workflow Settings & Safeguards</span>
+        <span class="toggle-icon" id="settingsToggleIcon">⚙️</span>
+      </div>
+
+      <div class="settings-body" id="settingsBody">
+        <div class="setting-item">
+          <div class="setting-info">
+            <label for="autoContinueToggle">Continue to Web Action</label>
+            <span class="setting-hint" id="autoContinueHint">Automatic (advance as soon as link loads)</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="autoContinueToggle" checked>
+            <span class="slider round"></span>
+          </label>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label for="readinessDelayInput">Readiness Delay (seconds)</label>
+            <span class="setting-hint">Safe buffer (10–15s) before marking chat ready</span>
+          </div>
+          <input type="number" id="readinessDelayInput" min="5" max="30" value="12" class="num-input">
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label for="autoCleanupToggle">Auto-Close Task Tabs</label>
+            <span class="setting-hint">Close only outreach tabs after verified completion</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="autoCleanupToggle">
+            <span class="slider round"></span>
+          </label>
+        </div>
+
+        <div class="setting-item" id="cleanupDelayRow" style="display: none;">
+          <div class="setting-info">
+            <label for="cleanupDelayInput">Cleanup Delay (seconds)</label>
+            <span class="setting-hint">Wait time before closing tabs</span>
+          </div>
+          <input type="number" id="cleanupDelayInput" min="2" max="20" value="5" class="num-input">
+        </div>
+
+        <div class="settings-footer">
+          <button id="btnResetState" class="btn btn-danger-outline btn-sm">
+            <span>🔄</span> Reset Stale Task State
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer Stats -->
+    <footer class="app-footer">
+      <div class="stat-item">
+        <span class="stat-number" id="statDetected">0</span>
+        <span class="stat-label">Detected</span>
+      </div>
+      <div class="stat-divider"></div>
+      <div class="stat-item">
+        <span class="stat-number" id="statCompleted">0</span>
+        <span class="stat-label">Completed</span>
+      </div>
+      <div class="stat-divider"></div>
+      <div class="stat-item">
+        <span class="stat-number" id="statFailed">0</span>
+        <span class="stat-label">Issues</span>
+      </div>
+    </footer>
+  </div>
+
+  <script src="../shared/constants.js"></script>
+  <script src="../shared/url_parser.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

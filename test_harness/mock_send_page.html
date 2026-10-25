@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Mock WhatsApp Send Page (api.whatsapp.com)</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background: #111b21;
+      color: #e9edef;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+    }
+    .card {
+      background: #202c33;
+      border-radius: 12px;
+      padding: 32px;
+      max-width: 480px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    }
+    .title {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    .subtitle {
+      color: #8696a0;
+      font-size: 14px;
+      margin-bottom: 24px;
+    }
+    .action-btn {
+      display: inline-block;
+      background: #00a884;
+      color: #111b21;
+      font-weight: 700;
+      text-decoration: none;
+      padding: 12px 28px;
+      border-radius: 24px;
+      margin: 12px 0;
+      font-size: 14px;
+      transition: background 0.2s;
+    }
+    .action-btn:hover {
+      background: #06cf9c;
+    }
+    .fallback-link {
+      display: block;
+      color: #53bdeb;
+      font-size: 13px;
+      text-decoration: underline;
+      margin-top: 14px;
+      cursor: pointer;
+    }
+    .controls {
+      margin-top: 28px;
+      padding-top: 18px;
+      border-top: 1px solid #2a3942;
+      text-align: left;
+      font-size: 12px;
+      color: #8696a0;
+    }
+    .controls select {
+      background: #111b21;
+      color: #e9edef;
+      border: 1px solid #3b4a54;
+      padding: 6px;
+      border-radius: 6px;
+      margin-top: 6px;
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="title">WhatsApp Messenger</div>
+    <div class="subtitle" id="recipientDisplay">Continue to chat with recipient</div>
+
+    <!-- Container for dynamic render testing -->
+    <div id="buttonContainer">
+      <a href="https://web.whatsapp.com/send/?phone=2347031615407&text=Hello%20from%20Bizz-Hunter" id="action-button" class="action-btn" target="_blank" role="link">
+        <span>Continue to WhatsApp Web</span>
+      </a>
+    </div>
+
+    <div id="clickFeedback" style="display:none; color:#00a884; font-weight:bold; margin-top:12px; font-size:13px;"></div>
+
+    <div class="controls">
+      <strong>DOM Simulation Mode:</strong>
+      <select id="modeSelect">
+        <option value="standard">1. Standard (#action-button -> web.whatsapp.com)</option>
+        <option value="delayed">2. Delayed Render (Button appears after 3 seconds)</option>
+        <option value="desktop_fallback">3. Desktop scheme with fallback "use WhatsApp Web" link</option>
+        <option value="duplicate_ids">4. Duplicate IDs (hidden desktop link + visible web link)</option>
+      </select>
+    </div>
+  </div>
+
+  <script src="../shared/constants.js"></script>
+  <script src="../shared/url_parser.js"></script>
+  <script src="../shared/dom_utils.js"></script>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const phone = params.get('phone') || '2347031615407';
+    const text = params.get('text') || 'Hello from Bizz-Hunter';
+    document.getElementById('recipientDisplay').textContent = `Chat with +${phone}`;
+
+    const modeSelect = document.getElementById('modeSelect');
+    const container = document.getElementById('buttonContainer');
+    const feedback = document.getElementById('clickFeedback');
+
+    function applyMode(mode) {
+      container.innerHTML = '';
+      if (mode === 'standard') {
+        container.innerHTML = `
+          <a href="https://web.whatsapp.com/send/?phone=${phone}&text=${encodeURIComponent(text)}" id="action-button" class="action-btn" target="_blank" role="link">
+            <span>Continue to WhatsApp Web</span>
+          </a>
+        `;
+      } else if (mode === 'delayed') {
+        container.innerHTML = `<span style="color:#8696a0;">Simulating delayed hydration... (3s)</span>`;
+        setTimeout(() => {
+          container.innerHTML = `
+            <a href="https://web.whatsapp.com/send/?phone=${phone}&text=${encodeURIComponent(text)}" id="action-button" class="action-btn" target="_blank" role="link">
+              <span>Continue to WhatsApp Web</span>
+            </a>
+          `;
+        }, 3000);
+      } else if (mode === 'desktop_fallback') {
+        container.innerHTML = `
+          <a href="whatsapp://send?phone=${phone}" id="action-button" class="action-btn" role="button">
+            <span>Open WhatsApp Desktop</span>
+          </a>
+          <a href="https://web.whatsapp.com/send/?phone=${phone}&text=${encodeURIComponent(text)}" class="fallback-link _9v6b" target="_blank">
+            use WhatsApp Web
+          </a>
+        `;
+      } else if (mode === 'duplicate_ids') {
+        container.innerHTML = `
+          <a href="whatsapp://send" id="action-button" style="display:none;">Hidden App</a>
+          <a href="https://web.whatsapp.com/send/?phone=${phone}&text=${encodeURIComponent(text)}" id="action-button" class="action-btn" target="_blank">
+            <span>Continue to WhatsApp Web</span>
+          </a>
+        `;
+      }
+    }
+
+    // Attach feedback listener to container
+    container.addEventListener('click', (e) => {
+      const target = e.target.closest('a, button');
+      if (target) {
+        feedback.style.display = 'block';
+        feedback.textContent = `✓ "${target.textContent.trim()}" automatically clicked! (Destination: ${target.getAttribute('href') || 'WhatsApp Web'})`;
+      }
+    });
+
+    modeSelect.addEventListener('change', (e) => {
+      feedback.style.display = 'none';
+      applyMode(e.target.value);
+    });
+  </script>
+</body>
+</html>

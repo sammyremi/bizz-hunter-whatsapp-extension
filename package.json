@@ -1,0 +1,17 @@
+{
+  "name": "bizzhunter-whatsapp-extension",
+  "version": "1.0.0",
+  "description": "Chrome/Brave browser extension for Bizz-Hunter WhatsApp outreach workflow",
+  "main": "background/service_worker.js",
+  "scripts": {
+    "test": "node tests/run_all_tests.js"
+  },
+  "keywords": [
+    "whatsapp",
+    "chrome-extension",
+    "bizz-hunter",
+    "brave"
+  ],
+  "author": "Bizz-Hunter Team",
+  "license": "ISC"
+}
