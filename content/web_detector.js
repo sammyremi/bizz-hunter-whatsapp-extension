@@ -28,53 +28,61 @@
   let insertionAttempts = 0;
   let readyTicksWithoutChat = 0;
   let hasNavigatedToRecipientChat = false;
+  let currentTaskId = null;
+  let isCountdownStarting = false;
   const MAX_CHECK_ATTEMPTS = 90; // 90 seconds of monitoring for slower connections
 
   /**
-   * Retrieves expected recipient phone and message text from URL or local storage.
+   * Retrieves expected recipient phone, message text, and task ID from URL or local storage.
    */
   async function getExpectedTaskInfo() {
     let phone = initialUrlPhone;
     let text = initialUrlText;
+    let taskId = currentTaskId;
 
-    if (!phone || !text) {
-      try {
-        const data = await chrome.storage.local.get([
-          BH.StorageKey.PENDING_MESSAGE_TEXT,
-          BH.StorageKey.PENDING_PHONE,
-          BH.StorageKey.ACTIVE_TASK_ID,
-          BH.StorageKey.TASKS
-        ]);
+    try {
+      const data = await chrome.storage.local.get([
+        BH.StorageKey.PENDING_MESSAGE_TEXT,
+        BH.StorageKey.PENDING_PHONE,
+        BH.StorageKey.ACTIVE_TASK_ID,
+        BH.StorageKey.TASKS
+      ]);
 
-        if (!text && data[BH.StorageKey.PENDING_MESSAGE_TEXT]) {
-          text = data[BH.StorageKey.PENDING_MESSAGE_TEXT];
-        }
-        if (!phone && data[BH.StorageKey.PENDING_PHONE]) {
-          phone = data[BH.StorageKey.PENDING_PHONE];
-        }
-
-        const activeId = data[BH.StorageKey.ACTIVE_TASK_ID];
-        const activeTask = activeId && data[BH.StorageKey.TASKS] ? data[BH.StorageKey.TASKS][activeId] : null;
-
-        if (activeTask) {
-          if (!phone) phone = activeTask.phoneNormalized || activeTask.phone || '';
-          if (!text) text = activeTask.messageText || '';
-        }
-
-        if ((!phone || !text) && data[BH.StorageKey.TASKS]) {
-          const list = Object.values(data[BH.StorageKey.TASKS]);
-          const recent = list.reverse().find(t => t.phoneNormalized || t.messageText);
-          if (recent) {
-            if (!phone) phone = recent.phoneNormalized || recent.phone || '';
-            if (!text) text = recent.messageText || '';
-          }
-        }
-      } catch (err) {
-        console.warn('[BizzHunter-WA] Error reading task info from storage:', err);
+      if (!text && data[BH.StorageKey.PENDING_MESSAGE_TEXT]) {
+        text = data[BH.StorageKey.PENDING_MESSAGE_TEXT];
       }
+      if (!phone && data[BH.StorageKey.PENDING_PHONE]) {
+        phone = data[BH.StorageKey.PENDING_PHONE];
+      }
+
+      const activeId = data[BH.StorageKey.ACTIVE_TASK_ID];
+      if (activeId) {
+        taskId = activeId;
+        currentTaskId = activeId;
+      }
+
+      const activeTask = activeId && data[BH.StorageKey.TASKS] ? data[BH.StorageKey.TASKS][activeId] : null;
+
+      if (activeTask) {
+        if (!phone) phone = activeTask.phoneNormalized || activeTask.phone || '';
+        if (!text) text = activeTask.messageText || '';
+      }
+
+      if ((!phone || !text) && data[BH.StorageKey.TASKS]) {
+        const list = Object.values(data[BH.StorageKey.TASKS]);
+        const recent = list.reverse().find(t => t.phoneNormalized || t.messageText);
+        if (recent) {
+          if (!phone) phone = recent.phoneNormalized || recent.phone || '';
+          if (!text) text = recent.messageText || '';
+          if (!taskId) taskId = recent.id;
+        }
+      }
+    } catch (err) {
+      console.warn('[BizzHunter-WA] Error reading task info from storage:', err);
     }
 
-    return { expectedPhone: phone, expectedText: text };
+    if (taskId) currentTaskId = taskId;
+    return { expectedPhone: phone, expectedText: text, taskId: currentTaskId };
   }
 
   /**
@@ -130,6 +138,8 @@
     payload: {
       url: window.location.href
     }
+  }).then(res => {
+    if (res && res.taskId) currentTaskId = res.taskId;
   }).catch(() => {});
 
   // 2. Periodic state inspector (1-second intervals while loading and settling)
@@ -155,6 +165,50 @@
       await ensureMessageInChatBox(state.composerElement, expectedText, expectedPhone, state.recipientVerified);
       // Re-inspect to capture newly inserted draft
       state = BH.inspectWhatsAppWeb(document, expectedPhone);
+    }
+
+    // 4b. Automatic Send Workflow:
+    // When message is verified drafted, active chat matches intended recipient, and send button is enabled,
+    // start a separate 10-second countdown to automatically click Send.
+    if (state.chatOpen && state.recipientVerified && state.hasDraft && expectedPhone && expectedText) {
+      const cleanDraft = BH.stripZeroWidth(state.composerElement ? (state.composerElement.innerText || state.composerElement.textContent || '') : '');
+      const isMessageMatched = cleanDraft === expectedText || cleanDraft.includes(expectedText);
+      const sendBtnInfo = BH.findSendButton(document, state.composerElement);
+
+      if (isMessageMatched && sendBtnInfo.found && sendBtnInfo.isEnabled) {
+        if (!autoSendCountdownTimer && !isAutoSending && !hasAutoSent && !isCountdownStarting) {
+          isCountdownStarting = true;
+          try {
+            const data = await chrome.storage.local.get([
+              BH.StorageKey.SETTINGS,
+              BH.StorageKey.TASKS,
+              BH.StorageKey.ACTIVE_TASK_ID
+            ]);
+            const settings = Object.assign({}, BH.DefaultSettings, (data && data[BH.StorageKey.SETTINGS]) || {});
+            const activeId = (data && data[BH.StorageKey.ACTIVE_TASK_ID]) || currentTaskId;
+            const activeTask = activeId && data[BH.StorageKey.TASKS] ? data[BH.StorageKey.TASKS][activeId] : null;
+
+            // If task is already sending, sent, completed, or locked, do not start countdown
+            if (activeTask && (activeTask.status === BH.TaskStatus.SENDING ||
+                               activeTask.status === BH.TaskStatus.SENT ||
+                               activeTask.status === BH.TaskStatus.COMPLETED ||
+                               activeTask.autoSent ||
+                               activeTask.sendLocked)) {
+              hasAutoSent = true;
+              isCountdownStarting = false;
+              return;
+            }
+
+            if (!settings.isPaused && settings.autoSendEnabled !== false) {
+              startAutoSendCountdown(expectedPhone, expectedText, settings, activeId);
+            }
+          } catch (err) {
+            console.warn('[BizzHunter-WA] Error reading settings for auto-send:', err);
+          } finally {
+            isCountdownStarting = false;
+          }
+        }
+      }
     }
 
     // 5. Requirement 7: Open recipient chat ONLY if NO conversation or composer is active.
@@ -261,6 +315,274 @@
     }
   }
 
+  // Auto-send state variables
+  let autoSendCountdownTimer = null;
+  let autoSendCountdownRemaining = 0;
+  let isAutoSending = false;
+  let hasAutoSent = false;
+  let autoSendBaselinePhone = '';
+  let autoSendBaselineText = '';
+
+  /**
+   * Starts the separate 10-second countdown to automatically click Send.
+   */
+  function startAutoSendCountdown(expectedPhone, expectedText, settings, taskId) {
+    if (autoSendCountdownTimer || isAutoSending || hasAutoSent) return;
+
+    const delaySec = (settings && settings.sendDelaySeconds !== undefined) ? settings.sendDelaySeconds : 10;
+    autoSendCountdownRemaining = delaySec;
+    autoSendBaselinePhone = expectedPhone;
+    autoSendBaselineText = expectedText;
+    if (taskId) currentTaskId = taskId;
+
+    console.log(`[BizzHunter-WA] Message verified for ${expectedPhone} (task: ${currentTaskId}). Starting ${delaySec}s countdown to automatic send...`);
+
+    // Notify background worker of countdown start
+    chrome.runtime.sendMessage({
+      type: BH.MessageType.AUTO_SEND_COUNTDOWN_TICK,
+      payload: {
+        taskId: currentTaskId,
+        remainingSeconds: autoSendCountdownRemaining,
+        phone: expectedPhone,
+        textSnippet: expectedText.substring(0, 30)
+      }
+    }).catch(() => {});
+
+    autoSendCountdownTimer = setInterval(async () => {
+      // 1. Check settings: cancel if paused or autoSend disabled
+      try {
+        const data = await chrome.storage.local.get(BH.StorageKey.SETTINGS);
+        const currSettings = (data && data[BH.StorageKey.SETTINGS]) || BH.DefaultSettings;
+        if (currSettings.isPaused || currSettings.autoSendEnabled === false) {
+          cancelAutoSend('Extension paused or autoSend disabled during countdown');
+          return;
+        }
+      } catch {}
+
+      // 2. Monitor DOM: re-inspect current state
+      const liveState = BH.inspectWhatsAppWeb(document, autoSendBaselinePhone);
+
+      // Check recipient
+      if (!liveState.chatOpen || !liveState.recipientVerified) {
+        cancelAutoSend('Active chat closed or recipient changed during countdown');
+        return;
+      }
+
+      // Check composer
+      if (!liveState.composerElement) {
+        cancelAutoSend('Composer element lost during countdown');
+        return;
+      }
+
+      // Check composer text: cancel if edited or cleared
+      const liveText = BH.stripZeroWidth(liveState.composerElement.innerText || liveState.composerElement.textContent || '');
+      if (liveText !== autoSendBaselineText && !liveText.includes(autoSendBaselineText)) {
+        cancelAutoSend('Composer text was modified or deleted during countdown');
+        return;
+      }
+
+      // Check Send button: cancel if disabled or disappeared
+      const sendInfo = BH.findSendButton(document, liveState.composerElement);
+      if (!sendInfo.found || !sendInfo.isEnabled) {
+        cancelAutoSend('Send button became disabled or disappeared during countdown');
+        return;
+      }
+
+      autoSendCountdownRemaining--;
+
+      // Notify background countdown progress
+      chrome.runtime.sendMessage({
+        type: BH.MessageType.AUTO_SEND_COUNTDOWN_TICK,
+        payload: {
+          taskId: currentTaskId,
+          remainingSeconds: Math.max(0, autoSendCountdownRemaining),
+          phone: autoSendBaselinePhone
+        }
+      }).catch(() => {});
+
+      console.log(`[BizzHunter-WA] Auto-send countdown: ${autoSendCountdownRemaining}s...`);
+
+      if (autoSendCountdownRemaining <= 0) {
+        clearInterval(autoSendCountdownTimer);
+        autoSendCountdownTimer = null;
+        executeAutoSend(autoSendBaselinePhone, autoSendBaselineText);
+      }
+    }, 1000);
+  }
+
+  /**
+   * Cancels a pending auto-send countdown with a specific diagnostic reason.
+   */
+  function cancelAutoSend(reason) {
+    if (autoSendCountdownTimer) {
+      clearInterval(autoSendCountdownTimer);
+      autoSendCountdownTimer = null;
+    }
+    console.warn(`[BizzHunter-WA] Auto-send countdown cancelled: ${reason}`);
+    chrome.runtime.sendMessage({
+      type: BH.MessageType.AUTO_SEND_CANCELLED,
+      payload: { taskId: currentTaskId, reason }
+    }).catch(() => {});
+  }
+
+  /**
+   * Executes the automatic Send button activation after repeating all verification checks
+   * and acquiring the authoritative send lock from the background service worker.
+   */
+  async function executeAutoSend(expectedPhone, expectedText) {
+    if (isAutoSending || hasAutoSent) {
+      console.warn('[BizzHunter-WA] Auto-send already in progress or completed, preventing duplicate execution');
+      return;
+    }
+
+    if (autoSendCountdownTimer) {
+      clearInterval(autoSendCountdownTimer);
+      autoSendCountdownTimer = null;
+    }
+
+    isAutoSending = true;
+
+    // Repeat all verification checks upon countdown expiry:
+    const finalState = BH.inspectWhatsAppWeb(document, expectedPhone);
+
+    // Verification Check 1: Active conversation must match intended recipient
+    if (!finalState.chatOpen || !finalState.recipientVerified) {
+      isAutoSending = false;
+      reportAutoSendFailure(`Final recipient verification failed: expected ${expectedPhone}, found "${finalState.recipientText}"`);
+      return;
+    }
+
+    // Verification Check 2: Composer must contain complete intended message
+    if (!finalState.composerElement) {
+      isAutoSending = false;
+      reportAutoSendFailure('Final check failed: message composer not found');
+      return;
+    }
+
+    const currentText = BH.stripZeroWidth(finalState.composerElement.innerText || finalState.composerElement.textContent || '');
+    if (!currentText || (currentText !== expectedText && !currentText.includes(expectedText))) {
+      isAutoSending = false;
+      reportAutoSendFailure('Final check failed: composer message was altered or is empty');
+      return;
+    }
+
+    // Verification Check 3 & 4: Real Send button must be located, visible, and enabled
+    const sendInfo = BH.findSendButton(document, finalState.composerElement);
+    if (!sendInfo.found || !sendInfo.isEnabled || !sendInfo.element) {
+      isAutoSending = false;
+      reportAutoSendFailure('Final check failed: real Send button is not visible or enabled');
+      return;
+    }
+
+    // Authoritative Send Lock: Request lock from background worker before clicking
+    try {
+      const lockRes = await chrome.runtime.sendMessage({
+        type: BH.MessageType.ACQUIRE_SEND_LOCK,
+        payload: {
+          taskId: currentTaskId,
+          phone: expectedPhone
+        }
+      });
+
+      if (!lockRes || !lockRes.acquired) {
+        console.warn(`[BizzHunter-WA] Send lock denied: ${lockRes ? lockRes.reason : 'unknown'}. Aborting duplicate send.`);
+        isAutoSending = false;
+        hasAutoSent = true;
+        return;
+      }
+    } catch (err) {
+      console.error('[BizzHunter-WA] Error requesting send lock:', err);
+      isAutoSending = false;
+      return;
+    }
+
+    // Mark hasAutoSent to prevent duplicate execution across retries/events
+    hasAutoSent = true;
+    console.log(`[BizzHunter-WA] ✓ All verification checks passed & send lock acquired! Activating Send button once for ${expectedPhone}...`);
+
+    try {
+      BH.activateControl(sendInfo.element);
+    } catch (err) {
+      isAutoSending = false;
+      reportAutoSendFailure(`Failed to click Send button: ${err.message}`);
+      return;
+    }
+
+    // Post-send verification: poll to confirm draft is cleared or message appears in conversation
+    setTimeout(() => {
+      verifyPostSend(expectedPhone, expectedText, 1);
+    }, 600);
+  }
+
+  /**
+   * Verifies that the message was sent by checking for composer draft clearance
+   * or appearance of the outgoing message in the conversation history.
+   */
+  function verifyPostSend(expectedPhone, expectedText, attempt) {
+    const checkState = BH.inspectWhatsAppWeb(document, expectedPhone);
+
+    // 1. Evidence A: Composer draft is cleared -> Message accepted and sent by WhatsApp
+    if (!checkState.hasDraft) {
+      console.log('[BizzHunter-WA] ✓ Post-send verified: draft cleared from composer. Task completed successfully!');
+      isAutoSending = false;
+      chrome.runtime.sendMessage({
+        type: BH.MessageType.AUTO_SEND_COMPLETED,
+        payload: {
+          taskId: currentTaskId,
+          phone: expectedPhone,
+          timestamp: Date.now(),
+          verifiedDraftCleared: true
+        }
+      }).catch(() => {});
+      return;
+    }
+
+    // 2. Evidence B: Outgoing message bubble with matching text appears in chat history
+    if (expectedText && BH.isMessageInConversation(document, expectedText)) {
+      console.log('[BizzHunter-WA] ✓ Post-send verified: message confirmed present in conversation panel!');
+      isAutoSending = false;
+      chrome.runtime.sendMessage({
+        type: BH.MessageType.AUTO_SEND_COMPLETED,
+        payload: {
+          taskId: currentTaskId,
+          phone: expectedPhone,
+          timestamp: Date.now(),
+          verifiedInConversation: true
+        }
+      }).catch(() => {});
+      return;
+    }
+
+    // Retry checking up to 4 times (around 2.5 seconds total)
+    if (attempt < 4) {
+      setTimeout(() => {
+        verifyPostSend(expectedPhone, expectedText, attempt + 1);
+      }, 600);
+      return;
+    }
+
+    // If draft remains after multiple verification attempts and message is not in conversation:
+    // Mark send status as unknown and stop automatic retries (NEVER blindly click Send again)
+    isAutoSending = false;
+    console.warn('[BizzHunter-WA] Send status ambiguous: draft remains and message not found in conversation history.');
+    chrome.runtime.sendMessage({
+      type: BH.MessageType.AUTO_SEND_UNKNOWN,
+      payload: {
+        taskId: currentTaskId,
+        phone: expectedPhone,
+        reason: 'Send status unknown: Send button was activated, but composer draft was not cleared and message was not confirmed in conversation'
+      }
+    }).catch(() => {});
+  }
+
+  function reportAutoSendFailure(reason) {
+    console.error(`[BizzHunter-WA] Auto-send failure: ${reason}`);
+    chrome.runtime.sendMessage({
+      type: BH.MessageType.AUTO_SEND_FAILED,
+      payload: { taskId: currentTaskId, reason }
+    }).catch(() => {});
+  }
+
   // Start polling
   activeCheckInterval = setInterval(runStateInspection, 1000);
   // Also run immediately
@@ -275,10 +597,20 @@
   });
 
   /**
-   * User-triggered Send action.
-   * Clicks the Send button only after verifying chat and draft exist.
+   * User-triggered Send action from popup.
+   * Clicks the Send button only after acquiring the authoritative lock and verifying chat and draft exist.
    */
-  function handleUserSendTrigger(sendResponse) {
+  async function handleUserSendTrigger(sendResponse) {
+    if (autoSendCountdownTimer) {
+      clearInterval(autoSendCountdownTimer);
+      autoSendCountdownTimer = null;
+    }
+
+    if (isAutoSending || hasAutoSent) {
+      sendResponse({ success: false, error: 'Send operation is already in progress or message was already sent' });
+      return;
+    }
+
     const inspection = BH.inspectWhatsAppWeb(document);
 
     if (!inspection.chatOpen) {
@@ -291,43 +623,66 @@
       return;
     }
 
-    let sendButton = inspection.sendButtonElement;
-    if (!sendButton) {
-      // Try finding send button again
-      const btn = document.querySelector('button[data-testid="compose-btn-send"], [data-icon="send"]');
-      if (btn) {
-        sendButton = btn.tagName.toLowerCase() === 'button' ? btn : btn.closest('button');
-      }
-    }
-
-    if (!sendButton) {
+    const sendInfo = BH.findSendButton(document, inspection.composerElement);
+    if (!sendInfo.found || !sendInfo.element) {
       sendResponse({ success: false, error: 'Send button could not be located in composer footer' });
       return;
     }
 
+    // Acquire lock from service worker
+    try {
+      const lockRes = await chrome.runtime.sendMessage({
+        type: BH.MessageType.ACQUIRE_SEND_LOCK,
+        payload: {
+          taskId: currentTaskId,
+          phone: inspection.recipientText
+        }
+      });
+
+      if (!lockRes || !lockRes.acquired) {
+        sendResponse({ success: false, error: lockRes ? lockRes.reason : 'Send lock denied' });
+        return;
+      }
+    } catch (err) {
+      sendResponse({ success: false, error: err.message });
+      return;
+    }
+
+    hasAutoSent = true;
+    isAutoSending = true;
+
     try {
       console.log('[BizzHunter-WA] User triggered Send click on composer button');
-      sendButton.click();
+      BH.activateControl(sendInfo.element);
 
       // Check after a brief delay if message was sent (composer should clear)
       setTimeout(() => {
         const afterCheck = BH.inspectWhatsAppWeb(document);
+        isAutoSending = false;
         sendResponse({
           success: true,
           message: 'Send action initiated',
           draftCleared: !afterCheck.hasDraft
         });
-        // Run state inspection to sync background
         runStateInspection();
       }, 600);
     } catch (err) {
       console.error('[BizzHunter-WA] Error executing send click:', err);
+      isAutoSending = false;
       sendResponse({ success: false, error: err.message });
     }
   }
 
   // Cleanup on unload
   window.addEventListener('beforeunload', () => {
+    if (autoSendCountdownTimer) {
+      clearInterval(autoSendCountdownTimer);
+      autoSendCountdownTimer = null;
+      chrome.runtime.sendMessage({
+        type: BH.MessageType.AUTO_SEND_CANCELLED,
+        payload: { taskId: currentTaskId, reason: 'WhatsApp Web tab navigated away or closed' }
+      }).catch(() => {});
+    }
     if (activeCheckInterval) {
       clearInterval(activeCheckInterval);
     }

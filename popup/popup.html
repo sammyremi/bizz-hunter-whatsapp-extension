@@ -107,12 +107,31 @@
         <div class="setting-item">
           <div class="setting-info">
             <label for="autoContinueToggle">Continue to Web Action</label>
-            <span class="setting-hint" id="autoContinueHint">Automatic (advance as soon as link loads)</span>
+            <span class="setting-hint" id="autoContinueHint">Automatic (advance after 10s countdown)</span>
           </div>
           <label class="switch">
             <input type="checkbox" id="autoContinueToggle" checked>
             <span class="slider round"></span>
           </label>
+        </div>
+
+        <div class="setting-item">
+          <div class="setting-info">
+            <label for="autoSendToggle">Automatic Send Action</label>
+            <span class="setting-hint" id="autoSendHint">Automatic (waits 10s then clicks Send)</span>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="autoSendToggle" checked>
+            <span class="slider round"></span>
+          </label>
+        </div>
+
+        <div class="setting-item" id="sendDelayRow">
+          <div class="setting-info">
+            <label for="sendDelayInput">Send Delay (seconds)</label>
+            <span class="setting-hint">Wait time before automatically clicking Send</span>
+          </div>
+          <input type="number" id="sendDelayInput" min="5" max="30" value="10" class="num-input">
         </div>
 
         <div class="setting-item">

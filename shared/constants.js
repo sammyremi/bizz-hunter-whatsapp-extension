@@ -22,7 +22,12 @@
     VERIFYING_RECIPIENT: 'Verifying recipient',
     WAITING_FOR_DRAFT: 'Waiting for draft',
     READY_FOR_ACTION: 'Ready for user action',
+    READY_TO_SEND: 'Ready for user action',
+    COUNTDOWN_TO_SEND: 'Countdown to auto-send',
+    SENDING: 'Sending message',
+    SENT: 'Sent',
     COMPLETED: 'Completed',
+    SEND_STATUS_UNKNOWN: 'Send status unknown',
     FAILED: 'Failed',
     PAUSED: 'Paused'
   });
@@ -37,6 +42,12 @@
     WEB_CHAT_STATUS: 'BH_WEB_CHAT_STATUS',
     WEB_INVALID_NUMBER: 'BH_WEB_INVALID_NUMBER',
     WEB_HANDOFF_FAILED: 'BH_WEB_HANDOFF_FAILED',
+    ACQUIRE_SEND_LOCK: 'BH_ACQUIRE_SEND_LOCK',
+    AUTO_SEND_COUNTDOWN_TICK: 'BH_AUTO_SEND_COUNTDOWN_TICK',
+    AUTO_SEND_CANCELLED: 'BH_AUTO_SEND_CANCELLED',
+    AUTO_SEND_COMPLETED: 'BH_AUTO_SEND_COMPLETED',
+    AUTO_SEND_FAILED: 'BH_AUTO_SEND_FAILED',
+    AUTO_SEND_UNKNOWN: 'BH_AUTO_SEND_UNKNOWN',
 
     // Popup/Content -> Background
     TRIGGER_CONTINUE_ACTION: 'BH_TRIGGER_CONTINUE_ACTION',
@@ -74,7 +85,10 @@
   const DefaultSettings = Object.freeze({
     isPaused: false,
     autoContinueEnabled: true, // Automatically click Continue to WhatsApp Web
-    readinessDelaySeconds: 12, // 10-15s recommended
+    continueDelaySeconds: 10,  // 10s countdown before activating Continue
+    autoSendEnabled: true,     // Automatically click Send after message is drafted
+    sendDelaySeconds: 10,      // 10s countdown before activating Send
+    readinessDelaySeconds: 10,
     autoCleanupEnabled: false, // Safe default: off
     cleanupDelaySeconds: 5
   });

@@ -53,6 +53,10 @@
       (continueElement && e.target.closest(continueElement.tagName) === continueElement)
     );
     if (anchor) {
+      if (autoContinueCountdownTimer) {
+        clearInterval(autoContinueCountdownTimer);
+        autoContinueCountdownTimer = null;
+      }
       hasInitiatedNavigation = true;
       let dest = anchor.getAttribute('href') || (continueElement && continueElement.getAttribute('href')) || '';
       if (!dest || !dest.includes('phone=')) {
@@ -71,6 +75,56 @@
       }).catch(() => {});
     }
   }, true);
+
+  let autoContinueCountdownTimer = null;
+  let continueCountdownRemaining = 0;
+
+  async function scheduleAutoContinue(result) {
+    if (hasInitiatedNavigation || autoContinueCountdownTimer) return;
+
+    // Check settings from storage to verify extension is not paused
+    let continueDelay = 10;
+    try {
+      const data = await chrome.storage.local.get(BH.StorageKey.SETTINGS);
+      const settings = data[BH.StorageKey.SETTINGS] || BH.DefaultSettings;
+      if (settings.isPaused || settings.autoContinueEnabled === false) {
+        console.log('[BizzHunter-WA] Auto-continue skipped because extension is paused or autoContinue is disabled');
+        return;
+      }
+      if (settings.continueDelaySeconds !== undefined) {
+        continueDelay = Math.max(0, settings.continueDelaySeconds);
+      }
+    } catch {
+      // Use default 10s if storage read fails
+    }
+
+    if (continueDelay <= 0) {
+      triggerAutoContinue(result);
+      return;
+    }
+
+    console.log(`[BizzHunter-WA] Continue control ready. Waiting ${continueDelay}s before activating...`);
+    continueCountdownRemaining = continueDelay;
+
+    autoContinueCountdownTimer = setInterval(() => {
+      continueCountdownRemaining--;
+
+      // Re-verify that Continue control is still in the DOM and ready
+      const check = BH.detectContinueControl(document, urlInfo);
+      if (!check.found || !check.isReady) {
+        console.warn('[BizzHunter-WA] Continue control was modified or removed during countdown');
+        clearInterval(autoContinueCountdownTimer);
+        autoContinueCountdownTimer = null;
+        return;
+      }
+
+      if (continueCountdownRemaining <= 0) {
+        clearInterval(autoContinueCountdownTimer);
+        autoContinueCountdownTimer = null;
+        triggerAutoContinue(check);
+      }
+    }, 1000);
+  }
 
   async function triggerAutoContinue(result) {
     if (hasInitiatedNavigation) return;
@@ -157,9 +211,9 @@
           }
         }).catch(() => {});
 
-        // Automatically activate as soon as element is ready
+        // Automatically activate after 10-second countdown once element is ready
         if (result.isReady) {
-          triggerAutoContinue(result);
+          scheduleAutoContinue(result);
         }
       } else {
         console.warn(`[BizzHunter-WA] Continue control not found: ${result.reason}`);
@@ -184,6 +238,10 @@
   });
 
   function handleUserContinueTrigger(sendResponse) {
+    if (autoContinueCountdownTimer) {
+      clearInterval(autoContinueCountdownTimer);
+      autoContinueCountdownTimer = null;
+    }
     if (!continueElement) {
       const immediate = BH.detectContinueControl(document, urlInfo);
       if (immediate.found) {
@@ -229,6 +287,10 @@
 
   // Cleanup on unload
   window.addEventListener('beforeunload', () => {
+    if (autoContinueCountdownTimer) {
+      clearInterval(autoContinueCountdownTimer);
+      autoContinueCountdownTimer = null;
+    }
     if (observerHandle) {
       observerHandle.disconnect();
     }

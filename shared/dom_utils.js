@@ -430,7 +430,8 @@
       if (typeof el.focus === 'function') el.focus();
     } catch {}
 
-    const eventNames = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+    // Dispatch pointer and mouse down/up gesture events
+    const eventNames = ['pointerdown', 'mousedown', 'pointerup', 'mouseup'];
     for (const evtName of eventNames) {
       try {
         let ev;
@@ -449,9 +450,18 @@
       } catch {}
     }
 
+    // Trigger single click action: prefer native .click(), fallback to dispatchEvent for headless environments
     try {
       if (typeof el.click === 'function') {
         el.click();
+      } else if (typeof el.dispatchEvent === 'function') {
+        let clickEv;
+        if (typeof MouseEvent !== 'undefined') {
+          clickEv = new MouseEvent('click', { bubbles: true, cancelable: true, view: win, buttons: 1 });
+        } else {
+          clickEv = { type: 'click', bubbles: true, cancelable: true };
+        }
+        el.dispatchEvent(clickEv);
       }
     } catch {}
 
@@ -636,20 +646,128 @@
       result.draftText = cleanDraft;
       result.hasDraft = cleanDraft.length > 0;
 
-      // Detect Send Button
-      const sendBtn = (mainArea || doc).querySelector(
-        'button[data-testid="compose-btn-send"], [data-icon="send"], button span[data-icon="send"]'
-      );
-
-      if (sendBtn) {
+      // Detect Send Button using findSendButton helper
+      const sendInfo = findSendButton(mainArea || doc, composer);
+      if (sendInfo.found) {
         result.sendButtonFound = true;
-        result.sendButtonElement = sendBtn.tagName.toLowerCase() === 'button'
-          ? sendBtn
-          : sendBtn.closest('button') || sendBtn;
+        result.sendButtonElement = sendInfo.element;
       }
     }
 
     return result;
+  }
+
+  /**
+   * Locates the active, visible, and enabled Send button in WhatsApp Web conversation footer.
+   * Ensures the button is not disabled, not the voice/mic button, and belongs to the active chat composer.
+   * @param {Document} doc
+   * @param {Element} [composerEl]
+   * @returns {{ found: boolean, element: Element|null, isEnabled: boolean }}
+   */
+  function findSendButton(doc, composerEl) {
+    if (!doc) return { found: false, element: null, isEnabled: false };
+
+    const mainArea = (typeof doc.getElementById === 'function' ? doc.getElementById('main') : null) ||
+      (typeof doc.querySelector === 'function' ? doc.querySelector('#main, [data-testid="conversation-panel-wrapper"]') : null) ||
+      doc;
+
+    // Primary selectors for WhatsApp Web Send button
+    const selectors = [
+      'button[data-testid="compose-btn-send"]',
+      'button span[data-icon="send"]',
+      '[data-icon="send"]',
+      'button[aria-label="Send"]',
+      'button[aria-label*="Send" i]',
+      'button[data-tab="11"]'
+    ];
+
+    let btn = null;
+    for (const sel of selectors) {
+      const match = mainArea.querySelector(sel);
+      if (match) {
+        btn = match.tagName && match.tagName.toLowerCase() === 'button'
+          ? match
+          : (match.closest ? match.closest('button') : match.parentElement) || match;
+        break;
+      }
+    }
+
+    if (!btn && composerEl) {
+      const parentFooter = composerEl.closest ? composerEl.closest('footer') : composerEl.parentElement;
+      if (parentFooter) {
+        for (const sel of selectors) {
+          const match = parentFooter.querySelector(sel);
+          if (match) {
+            btn = match.tagName && match.tagName.toLowerCase() === 'button'
+              ? match
+              : (match.closest ? match.closest('button') : match.parentElement) || match;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!btn) {
+      return { found: false, element: null, isEnabled: false };
+    }
+
+    const isVisible = isElementVisible(btn);
+    const disabledAttr = (typeof btn.hasAttribute === 'function' && btn.hasAttribute('disabled')) ||
+                         (typeof btn.getAttribute === 'function' && btn.getAttribute('aria-disabled') === 'true');
+    const isEnabled = isVisible && !disabledAttr;
+
+    return {
+      found: isVisible,
+      element: btn,
+      isEnabled: isEnabled
+    };
+  }
+
+  /**
+   * Checks whether the exact message has already appeared as an outgoing (sent) message
+   * in the active WhatsApp conversation history.
+   * @param {Document|Element} doc
+   * @param {string} expectedText
+   * @returns {boolean}
+   */
+  function isMessageInConversation(doc, expectedText) {
+    if (!doc || !expectedText) return false;
+
+    const mainArea = (typeof doc.getElementById === 'function' ? doc.getElementById('main') : null) ||
+      (typeof doc.querySelector === 'function' ? doc.querySelector('#main, [data-testid="conversation-panel-wrapper"]') : null) ||
+      doc;
+
+    const cleanExpected = stripZeroWidth(expectedText).trim();
+    if (!cleanExpected) return false;
+
+    // Outgoing message containers in WhatsApp Web
+    const outgoingSelectors = [
+      '.message-out',
+      'div[class*="message-out"]',
+      'div[data-id*="true_"]',
+      '[data-testid="msg-container"]'
+    ];
+
+    let bubbles = [];
+    if (typeof mainArea.querySelectorAll === 'function') {
+      for (const sel of outgoingSelectors) {
+        const found = mainArea.querySelectorAll(sel);
+        if (found && found.length > 0) {
+          bubbles = Array.from(found);
+          break;
+        }
+      }
+    }
+
+    // Check each bubble's text content
+    for (const bubble of bubbles) {
+      const bubbleText = stripZeroWidth(bubble.innerText || bubble.textContent || '').trim();
+      if (bubbleText === cleanExpected || bubbleText.includes(cleanExpected)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /**
@@ -896,6 +1014,8 @@
     focusAndPlaceCursorAtEnd,
     activateControl,
     activateAndFocusComposer,
+    findSendButton,
+    isMessageInConversation,
     detectContinueControl,
     observeContinueControl,
     inspectWhatsAppWeb,

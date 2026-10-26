@@ -77,7 +77,7 @@ Previous attempts failed in Brave due to five key factors:
 
 ## 4. Running the Automated Test Suite
 
-A standalone 30-test automated suite tests URL validation, DOM detection, delayed rendering, duplicate IDs, WhatsApp Web composer parsing, and background state lifecycles:
+A standalone 72-test automated suite tests URL validation, DOM detection, delayed rendering, duplicate IDs, WhatsApp Web composer parsing, background state lifecycles, and the full 10-second countdown and automatic send flow:
 
 ```bash
 cd /Users/samueladebayo/Projects/bizzhunter-whatsapp-extension
@@ -90,19 +90,21 @@ Expected output:
    Bizz-Hunter WhatsApp Extension Automated Tests   
 ====================================================
 --- Running URL Parser Tests ---
-  ✓ Parses valid WhatsApp send URL with phone and text
-  ...
+  ... (10 passed)
 --- Running Continue Control Detection Tests ---
-  ✓ Detects standard action-button linking to web.whatsapp.com
-  ...
+  ... (6 passed)
 --- Running WhatsApp Web Detector Tests ---
-  ✓ Identifies QR Code screen (user not logged in)
-  ...
+  ... (9 passed)
 --- Running State Machine & Lifecycle Tests ---
-  ✓ State persists in chrome.storage.local and survives service worker suspension
-  ...
+  ... (8 passed)
+--- Running Regression: Composer Message Prefill Tests ---
+  ... (11 passed)
+--- Running Continue to WhatsApp Web Navigation Tests ---
+  ... (14 passed)
+--- Running Auto-Send & 10-Second Countdown Tests ---
+  ... (14 passed)
 ====================================================
-Results: 27 Passed, 0 Failed
+Results: 72 Passed, 0 Failed
 ====================================================
 ✅ ALL TESTS PASSED SUCCESSFULLY!
 ```

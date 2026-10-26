@@ -9,6 +9,7 @@ const runWebDetectorTests = require('./web_detector.test.js');
 const runStateMachineTests = require('./state_machine.test.js');
 const runRegressionTests = require('./regression_composer_prefill.test.js');
 const runContinueNavigationTests = require('./continue_navigation_flow.test.js');
+const runAutoSendTests = require('./auto_send_flow.test.js');
 
 async function main() {
   console.log('====================================================');
@@ -42,6 +43,10 @@ async function main() {
     const res6 = await runContinueNavigationTests();
     totalPassed += res6.passed;
     totalFailed += res6.failed;
+
+    const res7 = await runAutoSendTests();
+    totalPassed += res7.passed;
+    totalFailed += res7.failed;
   } catch (err) {
     console.error('Fatal test runner error:', err);
     process.exit(1);

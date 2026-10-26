@@ -60,6 +60,10 @@ class MockElement {
     this.isFocused = true;
   }
 
+  click() {
+    this.dispatchEvent({ type: 'click', bubbles: true, cancelable: true });
+  }
+
   addEventListener(type, listener) {
     if (!this.listeners[type]) this.listeners[type] = [];
     this.listeners[type].push(listener);
@@ -202,6 +206,10 @@ class MockElement {
   querySelector(selector) {
     const list = this.querySelectorAll(selector);
     return list.length > 0 ? list[0] : null;
+  }
+
+  getElementById(id) {
+    return this.querySelector(`#${id}`);
   }
 
   getBoundingClientRect() {

@@ -37,6 +37,10 @@
   const settingsBody = document.getElementById('settingsBody');
   const autoContinueToggle = document.getElementById('autoContinueToggle');
   const autoContinueHint = document.getElementById('autoContinueHint');
+  const autoSendToggle = document.getElementById('autoSendToggle');
+  const autoSendHint = document.getElementById('autoSendHint');
+  const sendDelayRow = document.getElementById('sendDelayRow');
+  const sendDelayInput = document.getElementById('sendDelayInput');
   const readinessDelayInput = document.getElementById('readinessDelayInput');
   const autoCleanupToggle = document.getElementById('autoCleanupToggle');
   const cleanupDelayRow = document.getElementById('cleanupDelayRow');
@@ -141,11 +145,15 @@
         statusDot.classList.add('waiting');
         break;
       case BH.TaskStatus.READY_FOR_ACTION:
+      case BH.TaskStatus.COUNTDOWN_TO_SEND:
+      case BH.TaskStatus.SENDING:
         statusDot.classList.add('ready');
         break;
       case BH.TaskStatus.COMPLETED:
+      case BH.TaskStatus.SENT:
         statusDot.classList.add('completed');
         break;
+      case BH.TaskStatus.SEND_STATUS_UNKNOWN:
       case BH.TaskStatus.FAILED:
         statusDot.classList.add('failed');
         break;
@@ -231,8 +239,19 @@
       btnFocusWebTab.style.display = 'none';
     }
 
-    // Readiness Safeguard Countdown
-    if (task.readyAt && task.status !== BH.TaskStatus.COMPLETED && task.status !== BH.TaskStatus.FAILED) {
+    // Readiness Safeguard / Auto-Send Countdown
+    if (task.status === BH.TaskStatus.COUNTDOWN_TO_SEND) {
+      readinessProgressArea.style.display = 'flex';
+      const rem = task.autoSendCountdownRemaining !== undefined ? task.autoSendCountdownRemaining : 10;
+      const total = settings.sendDelaySeconds || 10;
+      countdownTimer.textContent = `Auto-sending in ${rem}s`;
+      const percent = Math.min(100, Math.max(0, ((total - rem) / total) * 100));
+      progressBar.style.width = `${percent}%`;
+    } else if (task.readyAt &&
+               task.status !== BH.TaskStatus.COMPLETED &&
+               task.status !== BH.TaskStatus.SENT &&
+               task.status !== BH.TaskStatus.FAILED &&
+               task.status !== BH.TaskStatus.SEND_STATUS_UNKNOWN) {
       readinessProgressArea.style.display = 'flex';
       setupReadinessCountdown(task, settings);
     } else {
@@ -240,14 +259,25 @@
     }
 
     // Send Action Button
-    if (task.status === BH.TaskStatus.READY_FOR_ACTION) {
+    if (task.status === BH.TaskStatus.READY_FOR_ACTION || task.status === BH.TaskStatus.COUNTDOWN_TO_SEND) {
       btnSendAction.disabled = settings.isPaused;
       btnContinueAction.disabled = true; // Continue already succeeded
-    } else if (task.status === BH.TaskStatus.COMPLETED) {
+      if (task.status === BH.TaskStatus.COUNTDOWN_TO_SEND) {
+        btnSendAction.innerHTML = `<span>⏳</span> Auto-sending in ${task.autoSendCountdownRemaining !== undefined ? task.autoSendCountdownRemaining : 10}s (or click now)`;
+      } else {
+        btnSendAction.innerHTML = '<span>🚀</span> Send Verified Message';
+      }
+    } else if (task.status === BH.TaskStatus.COMPLETED || task.status === BH.TaskStatus.SENT) {
       btnSendAction.disabled = true;
       btnContinueAction.disabled = true;
+      btnSendAction.innerHTML = '<span>✓</span> Message Sent';
+    } else if (task.status === BH.TaskStatus.SEND_STATUS_UNKNOWN) {
+      btnSendAction.disabled = true;
+      btnContinueAction.disabled = true;
+      btnSendAction.innerHTML = '<span>⚠️</span> Send Status Unknown';
     } else {
       btnSendAction.disabled = true;
+      btnSendAction.innerHTML = '<span>🚀</span> Send Verified Message';
     }
 
     // Error Alert
@@ -299,9 +329,26 @@
     }
     if (autoContinueHint) {
       autoContinueHint.textContent = isAuto
-        ? 'Automatic (instantly clicks Continue when page loads)'
+        ? 'Automatic (advance after 10s countdown)'
         : 'Manual (you click Continue whenever ready)';
     }
+
+    const isAutoSend = settings.autoSendEnabled !== false;
+    if (autoSendToggle) {
+      autoSendToggle.checked = isAutoSend;
+    }
+    if (autoSendHint) {
+      autoSendHint.textContent = isAutoSend
+        ? 'Automatic (waits 10s then clicks Send)'
+        : 'Manual (you click Send whenever ready)';
+    }
+    if (sendDelayInput) {
+      sendDelayInput.value = settings.sendDelaySeconds || 10;
+    }
+    if (sendDelayRow) {
+      sendDelayRow.style.display = isAutoSend ? 'flex' : 'none';
+    }
+
     readinessDelayInput.value = settings.readinessDelaySeconds || 12;
     autoCleanupToggle.checked = Boolean(settings.autoCleanupEnabled);
     cleanupDelayInput.value = settings.cleanupDelaySeconds || 5;
@@ -387,7 +434,7 @@
         const isEnabled = autoContinueToggle.checked;
         if (autoContinueHint) {
           autoContinueHint.textContent = isEnabled
-            ? 'Automatic (instantly clicks Continue when page loads)'
+            ? 'Automatic (advance after 10s countdown)'
             : 'Manual (you click Continue whenever ready)';
         }
         await chrome.runtime.sendMessage({
@@ -395,6 +442,41 @@
           payload: { autoContinueEnabled: isEnabled }
         });
         refreshState();
+      });
+    }
+
+    // 4c. Settings: Auto-Send Toggle
+    if (autoSendToggle) {
+      autoSendToggle.addEventListener('change', async () => {
+        const isEnabled = autoSendToggle.checked;
+        if (autoSendHint) {
+          autoSendHint.textContent = isEnabled
+            ? 'Automatic (waits 10s then clicks Send)'
+            : 'Manual (you click Send whenever ready)';
+        }
+        if (sendDelayRow) {
+          sendDelayRow.style.display = isEnabled ? 'flex' : 'none';
+        }
+        await chrome.runtime.sendMessage({
+          type: BH.MessageType.UPDATE_SETTINGS,
+          payload: { autoSendEnabled: isEnabled }
+        });
+        refreshState();
+      });
+    }
+
+    // 4d. Settings: Send Delay Input
+    if (sendDelayInput) {
+      sendDelayInput.addEventListener('change', async () => {
+        let val = parseInt(sendDelayInput.value, 10);
+        if (isNaN(val) || val < 5) val = 5;
+        if (val > 30) val = 30;
+        sendDelayInput.value = val;
+
+        await chrome.runtime.sendMessage({
+          type: BH.MessageType.UPDATE_SETTINGS,
+          payload: { sendDelaySeconds: val }
+        });
       });
     }
 

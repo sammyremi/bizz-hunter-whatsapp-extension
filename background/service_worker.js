@@ -429,7 +429,7 @@ async function handleMessage(type, payload, sender) {
         task.webUrl = payload.url;
         await saveState({ tasks: state.tasks });
       }
-      return { success: true };
+      return { success: true, taskId: task ? task.id : null };
     }
 
     // 4. Content Script: WhatsApp Web Chat Status Update
@@ -511,6 +511,142 @@ async function handleMessage(type, payload, sender) {
       return { success: true };
     }
 
+    // 5b-2. Content Script: Authoritative Send Lock Request
+    case MessageType.ACQUIRE_SEND_LOCK: {
+      const { taskId, phone } = payload || {};
+      let task = (taskId && state.tasks[taskId]) ||
+                 Object.values(state.tasks).find(t => t.webTabId === senderTabId) ||
+                 (state.activeTaskId ? state.tasks[state.activeTaskId] : null);
+
+      if (!task) {
+        return { acquired: false, reason: 'No matching active outreach task found' };
+      }
+
+      // If task is already sending, sent, completed, or locked: REJECT duplicate send
+      if (task.status === TaskStatus.SENDING ||
+          task.status === TaskStatus.SENT ||
+          task.status === TaskStatus.COMPLETED ||
+          task.autoSent ||
+          task.sendLocked) {
+        console.warn(`[BizzHunter-WA] Send lock REJECTED for task ${task.id}: already in state ${task.status} (locked=${task.sendLocked})`);
+        return {
+          acquired: false,
+          reason: `Task ${task.id} is already in state ${task.status}; duplicate send forbidden`
+        };
+      }
+
+      // Check recipient phone if provided
+      if (phone && task.phoneNormalized && !phone.endsWith(task.phoneNormalized.slice(-7))) {
+        return {
+          acquired: false,
+          reason: `Recipient mismatch: expected ${task.phoneNormalized}, got ${phone}`
+        };
+      }
+
+      // Atomically transition from ready_to_send / countdown to SENDING
+      task.status = TaskStatus.SENDING;
+      task.sendLocked = true;
+      task.sendingStartedAt = Date.now();
+
+      // Clear any pending alarms for this task
+      await chrome.alarms.clear(`${AlarmPrefix.READINESS}${task.id}`);
+
+      await saveState({ tasks: state.tasks });
+      console.log(`[BizzHunter-WA] Send lock ACQUIRED for task ${task.id}. Transitioned to SENDING.`);
+
+      return { acquired: true, taskId: task.id };
+    }
+
+    // 5c. Content Script: Auto-send countdown tick
+    case MessageType.AUTO_SEND_COUNTDOWN_TICK: {
+      let task = Object.values(state.tasks).find(t => t.webTabId === senderTabId) ||
+                 (state.activeTaskId ? state.tasks[state.activeTaskId] : null);
+
+      if (task &&
+          task.status !== TaskStatus.SENDING &&
+          task.status !== TaskStatus.SENT &&
+          task.status !== TaskStatus.COMPLETED &&
+          task.status !== TaskStatus.FAILED &&
+          !task.sendLocked) {
+        task.status = TaskStatus.COUNTDOWN_TO_SEND;
+        task.autoSendCountdownRemaining = payload.remainingSeconds;
+        await saveState({ tasks: state.tasks });
+      }
+      return { success: true };
+    }
+
+    // 5d. Content Script: Auto-send cancelled
+    case MessageType.AUTO_SEND_CANCELLED: {
+      let task = Object.values(state.tasks).find(t => t.webTabId === senderTabId) ||
+                 (state.activeTaskId ? state.tasks[state.activeTaskId] : null);
+
+      if (task && task.status === TaskStatus.COUNTDOWN_TO_SEND && !task.sendLocked) {
+        task.status = TaskStatus.READY_FOR_ACTION;
+        task.autoSendCancelledReason = payload.reason;
+        await saveState({ tasks: state.tasks });
+        console.warn(`[BizzHunter-WA] Auto-send cancelled for task ${task.id}: ${payload.reason}`);
+      }
+      return { success: true };
+    }
+
+    // 5e. Content Script: Auto-send completed successfully
+    case MessageType.AUTO_SEND_COMPLETED: {
+      let task = Object.values(state.tasks).find(t => t.webTabId === senderTabId) ||
+                 (state.activeTaskId ? state.tasks[state.activeTaskId] : null);
+
+      if (task && task.status !== TaskStatus.SENT && task.status !== TaskStatus.COMPLETED) {
+        task.status = TaskStatus.SENT;
+        task.completedAt = payload.timestamp || Date.now();
+        task.autoSent = true;
+        task.sendLocked = true;
+        task.verifiedDraftCleared = payload.verifiedDraftCleared === true;
+        task.verifiedInConversation = payload.verifiedInConversation === true;
+        state.stats.totalCompleted += 1;
+        await saveState({ tasks: state.tasks, stats: state.stats });
+
+        // Handle automatic tab cleanup if enabled
+        if (state.settings.autoCleanupEnabled) {
+          const delaySec = state.settings.cleanupDelaySeconds || 5;
+          await chrome.alarms.create(`${AlarmPrefix.CLEANUP}${task.id}`, {
+            delayInMinutes: delaySec / 60
+          });
+          console.log(`[BizzHunter-WA] Cleanup scheduled in ${delaySec}s for task ${task.id}`);
+        }
+        console.log(`[BizzHunter-WA] Auto-send completed successfully for task ${task.id}. Marked SENT.`);
+      }
+      return { success: true };
+    }
+
+    // 5f. Content Script: Auto-send uncertain status
+    case MessageType.AUTO_SEND_UNKNOWN: {
+      let task = Object.values(state.tasks).find(t => t.webTabId === senderTabId) ||
+                 (state.activeTaskId ? state.tasks[state.activeTaskId] : null);
+
+      if (task && task.status !== TaskStatus.SENT && task.status !== TaskStatus.COMPLETED) {
+        task.status = TaskStatus.SEND_STATUS_UNKNOWN;
+        task.errorMessage = payload.reason || 'Send status unknown: delivery could not be confirmed';
+        task.sendLocked = true; // Lock to prevent blind retries
+        await saveState({ tasks: state.tasks });
+        console.warn(`[BizzHunter-WA] Task ${task.id} marked SEND_STATUS_UNKNOWN: ${task.errorMessage}`);
+      }
+      return { success: true };
+    }
+
+    // 5g. Content Script: Auto-send failed
+    case MessageType.AUTO_SEND_FAILED: {
+      let task = Object.values(state.tasks).find(t => t.webTabId === senderTabId) ||
+                 (state.activeTaskId ? state.tasks[state.activeTaskId] : null);
+
+      if (task && task.status !== TaskStatus.SENT && task.status !== TaskStatus.COMPLETED) {
+        task.status = TaskStatus.FAILED;
+        task.errorMessage = payload.reason || 'Auto-send verification or activation failed';
+        state.stats.totalFailed += 1;
+        await saveState({ tasks: state.tasks, stats: state.stats });
+        console.error(`[BizzHunter-WA] Auto-send failed for task ${task.id}: ${task.errorMessage}`);
+      }
+      return { success: true };
+    }
+
     // 6. User Action: Trigger Continue Action from Popup
     case MessageType.TRIGGER_CONTINUE_ACTION: {
       const task = state.activeTaskId ? state.tasks[state.activeTaskId] : null;
@@ -552,14 +688,30 @@ async function handleMessage(type, payload, sender) {
         return { success: false, error: 'No active WhatsApp Web tab found' };
       }
 
+      if (task.status === TaskStatus.SENDING ||
+          task.status === TaskStatus.SENT ||
+          task.status === TaskStatus.COMPLETED ||
+          task.autoSent ||
+          task.sendLocked) {
+        return { success: false, error: `Task ${task.id} is already in state ${task.status}; message cannot be sent again` };
+      }
+
+      // Atomically transition to SENDING state before dispatching click
+      task.status = TaskStatus.SENDING;
+      task.sendLocked = true;
+      task.sendingStartedAt = Date.now();
+      await chrome.alarms.clear(`${AlarmPrefix.READINESS}${task.id}`);
+      await saveState({ tasks: state.tasks });
+
       try {
         const response = await chrome.tabs.sendMessage(task.webTabId, {
           type: MessageType.EXECUTE_SEND_CLICK
         });
 
         if (response && response.success) {
-          task.status = TaskStatus.COMPLETED;
+          task.status = TaskStatus.SENT;
           task.completedAt = Date.now();
+          task.autoSent = false; // manually triggered
           state.stats.totalCompleted += 1;
           await saveState({ tasks: state.tasks, stats: state.stats });
 
@@ -652,7 +804,14 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name.startsWith(AlarmPrefix.READINESS)) {
     const taskId = alarm.name.replace(AlarmPrefix.READINESS, '');
     const task = state.tasks[taskId];
-    if (task && task.status !== TaskStatus.COMPLETED && task.status !== TaskStatus.FAILED) {
+    if (task &&
+        task.status !== TaskStatus.COMPLETED &&
+        task.status !== TaskStatus.SENT &&
+        task.status !== TaskStatus.SENDING &&
+        task.status !== TaskStatus.COUNTDOWN_TO_SEND &&
+        task.status !== TaskStatus.SEND_STATUS_UNKNOWN &&
+        task.status !== TaskStatus.FAILED &&
+        !task.sendLocked) {
       task.status = TaskStatus.READY_FOR_ACTION;
       await saveState({ tasks: state.tasks });
       console.log(`[BizzHunter-WA] Task ${taskId} is now READY_FOR_ACTION`);
@@ -664,7 +823,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     const taskId = alarm.name.replace(AlarmPrefix.CLEANUP, '');
     const task = state.tasks[taskId];
 
-    if (task && task.status === TaskStatus.COMPLETED && state.settings.autoCleanupEnabled) {
+    if (task && (task.status === TaskStatus.COMPLETED || task.status === TaskStatus.SENT) && state.settings.autoCleanupEnabled) {
       console.log(`[BizzHunter-WA] Executing safe tab cleanup for completed task ${taskId}`);
 
       const tabsToClose = [];
