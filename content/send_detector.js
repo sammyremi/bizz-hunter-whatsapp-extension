@@ -45,7 +45,7 @@
   let observerHandle = null;
   let hasInitiatedNavigation = false;
 
-  // Intercept any manual click on Continue or web.whatsapp.com links to open in a new tab rather than navigating the current send tab
+  // Handle manual clicks on Continue controls: ensure href carries phone and text parameters
   document.addEventListener('click', (e) => {
     const anchor = e.target.closest && (
       e.target.closest('a[href*="web.whatsapp.com"]') ||
@@ -53,20 +53,22 @@
       (continueElement && e.target.closest(continueElement.tagName) === continueElement)
     );
     if (anchor) {
-      const dest = anchor.getAttribute('href') || (continueElement && continueElement.getAttribute('href')) || 'https://web.whatsapp.com/';
-      if (dest && (dest.includes('web.whatsapp.com') || dest.startsWith('/'))) {
-        e.preventDefault();
-        e.stopPropagation();
-        console.log(`[BizzHunter-WA] Intercepted manual click, opening new tab for: ${dest}`);
-        hasInitiatedNavigation = true;
-        chrome.runtime.sendMessage({
-          type: BH.MessageType.ENSURE_WEB_NAVIGATION,
-          payload: {
-            destinationUrl: dest,
-            userTriggered: true
-          }
-        }).catch(() => {});
+      hasInitiatedNavigation = true;
+      let dest = anchor.getAttribute('href') || (continueElement && continueElement.getAttribute('href')) || '';
+      if (!dest || !dest.includes('phone=')) {
+        dest = BH.buildWhatsAppWebSendUrl(urlInfo.phoneNormalized, urlInfo.text);
+        if (anchor.tagName && anchor.tagName.toLowerCase() === 'a') {
+          anchor.setAttribute('href', dest);
+        }
       }
+      console.log(`[BizzHunter-WA] Manual click on Continue control registered for: ${dest}`);
+      chrome.runtime.sendMessage({
+        type: BH.MessageType.CONTINUE_ACTION_ACTIVATED,
+        payload: {
+          destinationUrl: dest,
+          userTriggered: true
+        }
+      }).catch(() => {});
     }
   }, true);
 
@@ -85,8 +87,19 @@
       // Continue with default (enabled) if storage read fails
     }
 
+    // Revalidate the continue element directly before activation
+    const current = BH.detectContinueControl(document, urlInfo);
+    const targetElement = (current.found && current.element) ? current.element : continueElement;
+
+    if (!targetElement) {
+      console.warn('[BizzHunter-WA] Auto-continue aborted: Continue control not found on revalidation');
+      return;
+    }
+
     hasInitiatedNavigation = true;
-    console.log(`[BizzHunter-WA] Auto-continue: opening detected destination in new tab: "${result.destinationUrl || 'default'}"`);
+    const dest = (current.destinationUrl || result.destinationUrl || BH.buildWhatsAppWebSendUrl(urlInfo.phoneNormalized, urlInfo.text));
+
+    console.log(`[BizzHunter-WA] Auto-continue: activating Continue control for "${dest}"`);
 
     // Notify background that auto-continue is executing
     chrome.runtime.sendMessage({
@@ -95,21 +108,33 @@
         found: true,
         isReady: true,
         visibleText: result.visibleText,
-        destinationUrl: result.destinationUrl,
+        destinationUrl: dest,
         targetType: result.targetType,
         autoTriggered: true
       }
     }).catch(() => {});
 
-    // Open detected Continue destination in a NEW tab using service worker chrome.tabs.create
-    // This preserves the original send tab and avoids navigating away from api.whatsapp.com
     chrome.runtime.sendMessage({
-      type: BH.MessageType.ENSURE_WEB_NAVIGATION,
+      type: BH.MessageType.CONTINUE_ACTION_ACTIVATED,
       payload: {
-        destinationUrl: result.destinationUrl,
+        destinationUrl: dest,
         autoTriggered: true
       }
     }).catch(() => {});
+
+    // Genuine user-facing activation: pointerdown, mousedown, pointerup, mouseup, click + .click()
+    BH.activateControl(targetElement);
+
+    // Fallback safeguard: if popup blocker suppressed target="_blank" tab opening, ensure navigation
+    setTimeout(() => {
+      chrome.runtime.sendMessage({
+        type: BH.MessageType.ENSURE_WEB_NAVIGATION,
+        payload: {
+          destinationUrl: dest,
+          autoTriggered: true
+        }
+      }).catch(() => {});
+    }, 1500);
   }
 
   // 2. Observe the DOM for the Continue control
@@ -132,7 +157,7 @@
           }
         }).catch(() => {});
 
-        // Automatically open new tab as soon as element is ready
+        // Automatically activate as soon as element is ready
         if (result.isReady) {
           triggerAutoContinue(result);
         }
@@ -147,7 +172,7 @@
           }
         }).catch(() => {});
       }
-    }, 12000); // 12 second maximum observation window
+    }, 12000, urlInfo); // 12 second maximum observation window
   }
 
   // 3. Listen for user-triggered continue action from background or popup
@@ -160,13 +185,28 @@
 
   function handleUserContinueTrigger(sendResponse) {
     if (!continueElement) {
-      const immediate = BH.detectContinueControl(document);
+      const immediate = BH.detectContinueControl(document, urlInfo);
       if (immediate.found) {
         continueElement = immediate.element;
       }
     }
 
-    const dest = (continueElement && continueElement.getAttribute('href')) || 'https://web.whatsapp.com/';
+    const dest = (continueElement && continueElement.getAttribute('href')) || BH.buildWhatsAppWebSendUrl(urlInfo.phoneNormalized, urlInfo.text);
+    hasInitiatedNavigation = true;
+
+    chrome.runtime.sendMessage({
+      type: BH.MessageType.CONTINUE_ACTION_ACTIVATED,
+      payload: {
+        destinationUrl: dest,
+        userTriggered: true
+      }
+    }).catch(() => {});
+
+    if (continueElement) {
+      BH.activateControl(continueElement);
+    }
+
+    // Also send ensure navigation as backup
     chrome.runtime.sendMessage({
       type: BH.MessageType.ENSURE_WEB_NAVIGATION,
       payload: {
@@ -174,7 +214,7 @@
         userTriggered: true
       }
     }).then(() => {
-      sendResponse({ success: true, message: 'New tab navigation initiated for detected Continue destination' });
+      sendResponse({ success: true, message: 'Continue action executed' });
     }).catch(err => {
       sendResponse({ success: false, error: err.message });
     });

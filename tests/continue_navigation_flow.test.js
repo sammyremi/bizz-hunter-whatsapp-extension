@@ -67,51 +67,48 @@ async function runContinueNavigationTests() {
     assert.strictEqual(activeTask.messageText, 'Hi Arewa Specialist, saw your listing!');
   });
 
-  // 2. The original tab is not unintentionally navigated when the new-tab workflow is active
-  await test('2. The original tab is not unintentionally navigated when the new-tab workflow is active', () => {
+  // 2. The Continue click preserves phone and text parameters and registers continue action
+  await test('2. The Continue click preserves phone and text parameters and registers continue action', () => {
     const doc = new MockDocument();
     let currentWindowLocation = 'https://api.whatsapp.com/send/?phone=2347031615407&text=Hello';
+    const urlInfo = BH_URL.parseWhatsAppUrl(currentWindowLocation);
 
     const anchor = doc.createElement('a', {
       id: 'action-button',
-      href: 'https://web.whatsapp.com/'
+      href: 'https://web.whatsapp.com/send/?phone=2347031615407&text=Hello'
     }, 'Continue to WhatsApp Web');
     doc.body.appendChild(anchor);
 
-    // Simulate click event with preventDefault
-    let defaultPrevented = false;
     let messageSent = null;
-
     const fakeEvent = {
       target: anchor,
       type: 'click',
-      preventDefault: () => { defaultPrevented = true; },
+      preventDefault: () => {},
       stopPropagation: () => {}
     };
 
-    // Click handler simulation matching send_detector.js
+    // Click handler matching updated send_detector.js
     const clickedAnchor = fakeEvent.target.closest('a[href*="web.whatsapp.com"]') ||
                           fakeEvent.target.closest('[id="action-button"]');
 
     if (clickedAnchor) {
-      const dest = clickedAnchor.getAttribute('href');
-      if (dest && (dest.includes('web.whatsapp.com') || dest.startsWith('/'))) {
-        fakeEvent.preventDefault();
-        messageSent = {
-          type: BH_CONST.MessageType.ENSURE_WEB_NAVIGATION,
-          payload: { destinationUrl: dest, userTriggered: true }
-        };
+      let dest = clickedAnchor.getAttribute('href') || '';
+      if (!dest || !dest.includes('phone=')) {
+        dest = BH_URL.buildWhatsAppWebSendUrl(urlInfo.phoneNormalized, urlInfo.text);
       }
+      messageSent = {
+        type: BH_CONST.MessageType.CONTINUE_ACTION_ACTIVATED,
+        payload: { destinationUrl: dest, userTriggered: true }
+      };
     }
 
-    assert.strictEqual(defaultPrevented, true);
+    assert.strictEqual(messageSent.type, BH_CONST.MessageType.CONTINUE_ACTION_ACTIVATED);
+    assert.strictEqual(messageSent.payload.destinationUrl, 'https://web.whatsapp.com/send/?phone=2347031615407&text=Hello');
     assert.strictEqual(currentWindowLocation, 'https://api.whatsapp.com/send/?phone=2347031615407&text=Hello');
-    assert.strictEqual(messageSent.type, BH_CONST.MessageType.ENSURE_WEB_NAVIGATION);
-    assert.strictEqual(messageSent.payload.destinationUrl, 'https://web.whatsapp.com/');
   });
 
-  // 3. The new tab receives the detected destination URL without corrupting it with ?text=
-  await test('3. The new tab receives the detected destination URL (without corrupting with ?text=)', async () => {
+  // 3. Service worker ENSURE_WEB_NAVIGATION guarantees recipient and text are preserved
+  await test('3. Service worker ENSURE_WEB_NAVIGATION guarantees recipient and text are preserved', async () => {
     let createdTabUrl = null;
     const mockChromeTabs = {
       create: async ({ url }) => {
@@ -120,28 +117,34 @@ async function runContinueNavigationTests() {
       }
     };
 
-    // When the detected destination is https://web.whatsapp.com/
-    const detectedDestination = 'https://web.whatsapp.com/';
     const task = {
       id: 'task_1',
       sendTabId: 101,
       webTabId: null,
+      phoneNormalized: '2347031615407',
       messageText: 'Hello there'
     };
 
-    // Handler logic from service_worker.js
+    // Service worker logic: if incoming destination lacks phone, reconstruct from task
     async function handleEnsureNav(payloadDest) {
-      let destUrl = payloadDest || 'https://web.whatsapp.com/';
+      let destUrl = payloadDest || '';
+      if (!destUrl || !destUrl.includes('phone=')) {
+        if (task.phoneNormalized) {
+          destUrl = BH_URL.buildWhatsAppWebSendUrl(task.phoneNormalized, task.messageText);
+        } else {
+          destUrl = 'https://web.whatsapp.com/';
+        }
+      }
       const newTab = await mockChromeTabs.create({ url: destUrl, active: true });
       task.webTabId = newTab.id;
       task.webUrl = destUrl;
       return { success: true, createdTabId: newTab.id };
     }
 
-    await handleEnsureNav(detectedDestination);
+    // Even if a bare https://web.whatsapp.com/ destination was provided:
+    await handleEnsureNav('https://web.whatsapp.com/');
 
-    // Must NOT have appended ?text=Hello to web.whatsapp.com/
-    assert.strictEqual(createdTabUrl, 'https://web.whatsapp.com/');
+    assert.strictEqual(createdTabUrl, 'https://web.whatsapp.com/send/?phone=2347031615407&text=Hello+there');
     assert.strictEqual(task.webTabId, 202);
   });
 
@@ -328,6 +331,84 @@ async function runContinueNavigationTests() {
 
     const alreadyAttemptedNav = mockSessionStorage.getItem(navKey) === 'true';
     assert.strictEqual(alreadyAttemptedNav, true);
+  });
+
+  // 11. activateControl dispatches genuine pointer and click sequence
+  await test('11. activateControl dispatches genuine pointer and click sequence', () => {
+    const doc = new MockDocument();
+    const btn = doc.createElement('button', { id: 'action-button' }, 'Continue to WhatsApp Web');
+    doc.body.appendChild(btn);
+
+    const eventsDispatched = [];
+    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+      btn.addEventListener(evt, () => eventsDispatched.push(evt));
+    });
+
+    const activated = BH_DOM.activateControl(btn);
+    assert.strictEqual(activated, true);
+    assert.strictEqual(btn.isFocused, true);
+    assert.ok(eventsDispatched.includes('click'));
+  });
+
+  // 12. detectContinueControl filters out navigation header/footer links (Log In, Download)
+  await test('12. detectContinueControl filters out header Login and footer Download links', () => {
+    const doc = new MockDocument();
+    const header = doc.createElement('header');
+    const loginLink = doc.createElement('a', { href: 'https://web.whatsapp.com/', class: 'header-login-link' }, 'Log In');
+    header.appendChild(loginLink);
+    doc.body.appendChild(header);
+
+    const continueBtn = doc.createElement('a', {
+      id: 'action-button',
+      href: 'https://web.whatsapp.com/send/?phone=2348147468979&text=TestMessage'
+    }, 'Continue to WhatsApp Web');
+    doc.body.appendChild(continueBtn);
+
+    const urlInfo = {
+      phoneNormalized: '2348147468979',
+      text: 'TestMessage'
+    };
+
+    const detected = BH_DOM.detectContinueControl(doc, urlInfo);
+    assert.strictEqual(detected.found, true);
+    assert.strictEqual(detected.element, continueBtn);
+    assert.ok(detected.destinationUrl.includes('phone=2348147468979'));
+  });
+
+  // 13. activateAndFocusComposer wakes up Lexical without destroying DOM
+  await test('13. activateAndFocusComposer wakes up Lexical without destroying DOM structure', () => {
+    const doc = new MockDocument();
+    const composer = doc.createElement('div', { contenteditable: 'true', role: 'textbox' });
+    const p = doc.createElement('p', { class: 'selectable-text copyable-text' });
+    const span = doc.createElement('span', { 'data-lexical-text': 'true' }, 'Hello there');
+    p.appendChild(span);
+    composer.appendChild(p);
+    doc.body.appendChild(composer);
+
+    BH_DOM.activateAndFocusComposer(composer, 'Hello there');
+    assert.strictEqual(composer.isFocused, true);
+    // Ensure p and span are still in place!
+    assert.strictEqual(composer.childNodes.length, 1);
+    assert.strictEqual(composer.childNodes[0].tagName, 'P');
+    assert.strictEqual(BH_DOM.stripZeroWidth(composer.textContent), 'Hello there');
+  });
+
+  // 14. insertMessageIntoComposer never overwrites root textContent directly
+  await test('14. insertMessageIntoComposer never overwrites root textContent directly', () => {
+    const doc = new MockDocument();
+    const composer = doc.createElement('div', { contenteditable: 'true', role: 'textbox' });
+    doc.body.appendChild(composer);
+
+    const msg = 'Testing message preservation: 100% working!';
+    const inserted = BH_DOM.insertMessageIntoComposer(composer, msg);
+    assert.strictEqual(inserted, true);
+
+    // Verify Lexical paragraph structure was created properly
+    const p = composer.querySelector('p');
+    assert.ok(p, 'Composer must contain a <p> tag for Lexical');
+    const span = p.querySelector('span[data-lexical-text="true"]');
+    assert.ok(span, 'Paragraph must contain a span with data-lexical-text');
+    assert.strictEqual(BH_DOM.stripZeroWidth(span.textContent), msg);
   });
 
   return { passed, failed };

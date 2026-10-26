@@ -109,6 +109,24 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 /**
+ * Monitor tab creation to detect tabs opened from the send tab (e.g. by Continue click target="_blank")
+ */
+chrome.tabs.onCreated.addListener(async (tab) => {
+  if (!tab || !tab.id) return;
+  const state = await getState();
+  const activeTask = state.activeTaskId ? state.tasks[state.activeTaskId] : null;
+
+  if (activeTask && activeTask.sendTabId && tab.openerTabId === activeTask.sendTabId) {
+    if (!activeTask.webTabId) {
+      activeTask.webTabId = tab.id;
+      activeTask.status = TaskStatus.WAITING_FOR_WEB;
+      await saveState({ tasks: state.tasks });
+      console.log(`[BizzHunter-WA] Linked newly created child tab ${tab.id} to active task ${activeTask.id}`);
+    }
+  }
+});
+
+/**
  * Monitor tab removal to clean up task state safely without touching unrelated tabs
  */
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
@@ -348,7 +366,22 @@ async function handleMessage(type, payload, sender) {
       return { success: true };
     }
 
-    // 2b. Content Script: Open detected Continue destination in a new tab
+    // 2b. Content Script: Continue action activated on send page
+    case MessageType.CONTINUE_ACTION_ACTIVATED: {
+      let task = Object.values(state.tasks).find(t => t.sendTabId === senderTabId) ||
+                 (state.activeTaskId ? state.tasks[state.activeTaskId] : null);
+
+      if (task) {
+        task.status = TaskStatus.WAITING_FOR_WEB;
+        if (payload.destinationUrl) {
+          task.continueDestinationUrl = payload.destinationUrl;
+        }
+        await saveState({ tasks: state.tasks });
+      }
+      return { success: true };
+    }
+
+    // 2c. Content Script: Open detected Continue destination in a new tab
     case MessageType.ENSURE_WEB_NAVIGATION: {
       let task = Object.values(state.tasks).find(t => t.sendTabId === senderTabId) ||
                  (state.activeTaskId ? state.tasks[state.activeTaskId] : null);
@@ -360,14 +393,22 @@ async function handleMessage(type, payload, sender) {
         return { success: true, alreadyLinked: true };
       }
 
-      let destUrl = payload.destinationUrl || task.continueDestinationUrl || 'https://web.whatsapp.com/';
+      let destUrl = payload.destinationUrl || task.continueDestinationUrl || '';
+      if (!destUrl || !destUrl.includes('phone=')) {
+        if (task.phoneNormalized) {
+          destUrl = BH.buildWhatsAppWebSendUrl(task.phoneNormalized, task.messageText);
+        } else {
+          destUrl = 'https://web.whatsapp.com/';
+        }
+      }
+
       if (destUrl.startsWith('//')) {
         destUrl = `https:${destUrl}`;
       } else if (!destUrl.startsWith('http://') && !destUrl.startsWith('https://')) {
         try {
           destUrl = new URL(destUrl, 'https://web.whatsapp.com').href;
         } catch {
-          destUrl = 'https://web.whatsapp.com/';
+          destUrl = BH.buildWhatsAppWebSendUrl(task.phoneNormalized, task.messageText);
         }
       }
 
@@ -451,6 +492,21 @@ async function handleMessage(type, payload, sender) {
         task.errorMessage = payload.message || 'Phone number is invalid or not registered on WhatsApp';
         state.stats.totalFailed += 1;
         await saveState({ tasks: state.tasks, stats: state.stats });
+      }
+      return { success: true };
+    }
+
+    // 5b. Content Script: Web Handoff / Composer Population Failed
+    case MessageType.WEB_HANDOFF_FAILED: {
+      let task = Object.values(state.tasks).find(t => t.webTabId === senderTabId) ||
+                 (state.activeTaskId ? state.tasks[state.activeTaskId] : null);
+
+      if (task && task.status !== TaskStatus.COMPLETED) {
+        task.status = TaskStatus.FAILED;
+        task.errorMessage = payload.reason || 'WhatsApp Web composer could not be populated';
+        state.stats.totalFailed += 1;
+        await saveState({ tasks: state.tasks, stats: state.stats });
+        console.warn(`[BizzHunter-WA] Web handoff failed for task ${task.id}: ${task.errorMessage}`);
       }
       return { success: true };
     }

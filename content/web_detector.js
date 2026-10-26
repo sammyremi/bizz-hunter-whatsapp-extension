@@ -96,7 +96,7 @@
 
     // If chat composer already has the expected message:
     if (expectedText && (cleanCurrent === expectedText || cleanCurrent.includes(expectedText))) {
-      BH.focusAndPlaceCursorAtEnd(composerEl);
+      BH.activateAndFocusComposer(composerEl, expectedText);
       hasDraftedMessage = true;
       console.log('[BizzHunter-WA] Message confirmed drafted in chat box');
       return;
@@ -245,9 +245,19 @@
       activeCheckInterval = setInterval(runStateInspection, 3000); // Check every 3s thereafter
     }
 
-    if (checkAttempts >= MAX_CHECK_ATTEMPTS && !summary.chatOpen) {
+    if (checkAttempts >= MAX_CHECK_ATTEMPTS && (!summary.chatOpen || !summary.hasDraft)) {
       clearInterval(activeCheckInterval);
       console.log('[BizzHunter-WA] Reached max inspection timeout for chat readiness');
+      if (!summary.hasDraft && expectedText) {
+        chrome.runtime.sendMessage({
+          type: BH.MessageType.WEB_HANDOFF_FAILED,
+          payload: {
+            reason: summary.chatOpen
+              ? 'Chat opened but message composer was not populated'
+              : 'Timed out waiting for WhatsApp Web chat to open'
+          }
+        }).catch(() => {});
+      }
     }
   }
 

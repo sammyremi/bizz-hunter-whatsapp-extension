@@ -83,73 +83,193 @@
    *   reason?: string
    * }}
    */
-  function detectContinueControl(doc) {
+  /**
+   * Helper to build supported web send URL if BH.buildWhatsAppWebSendUrl is unavailable.
+   */
+  function buildWebSendUrl(phone, text) {
+    if (typeof BH !== 'undefined' && typeof BH.buildWhatsAppWebSendUrl === 'function') {
+      return BH.buildWhatsAppWebSendUrl(phone, text);
+    }
+    const cleanPhone = (phone || '').replace(/[^0-9]/g, '');
+    if (!cleanPhone) return 'https://web.whatsapp.com/';
+    try {
+      const url = new URL('https://web.whatsapp.com/send/');
+      url.searchParams.set('phone', cleanPhone);
+      if (text) url.searchParams.set('text', text);
+      return url.toString();
+    } catch {
+      return `https://web.whatsapp.com/send/?phone=${cleanPhone}${text ? '&text=' + encodeURIComponent(text) : ''}`;
+    }
+  }
+
+  /**
+   * Helper to check if an element belongs to the header navigation, footer,
+   * or represents an unrelated action (e.g. login, download, terms).
+   */
+  function isExcludedNavigationControl(el) {
+    if (!el) return true;
+
+    // Check ancestors for header / footer / nav elements
+    if (typeof el.closest === 'function') {
+      if (el.closest('header, footer, nav, [role="navigation"]')) {
+        return true;
+      }
+    }
+
+    // Check data-ms telemetry attributes
+    const dataMs = (el.getAttribute && el.getAttribute('data-ms') || '').toLowerCase();
+    if (dataMs.includes('login') || dataMs.includes('download') || dataMs.includes('footer') || dataMs.includes('nav')) {
+      return true;
+    }
+
+    // Check aria-label
+    const ariaLabel = (el.getAttribute && el.getAttribute('aria-label') || '').toLowerCase();
+    if (ariaLabel.includes('log in') || ariaLabel.includes('download') || ariaLabel.includes('legal') || ariaLabel.includes('policies')) {
+      return true;
+    }
+
+    // Check text content
+    const text = normalizeText(el.textContent || '');
+    if (text === 'log in' || text === 'download' || text === 'download app' || text === 'download it now') {
+      return true;
+    }
+
+    // Check href
+    const href = (el.getAttribute && el.getAttribute('href') || '').toLowerCase();
+    if (href.includes('/desktop/') || href.includes('/legal/')) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Inspects the DOM on api.whatsapp.com/send to find the genuine Continue to WhatsApp Web element.
+   *
+   * Strategy:
+   * 1. Filters out generic navigation links (e.g. Log In, Download app, footer links).
+   * 2. Checks telemetry data-ms attributes ('UseWhatsAppWeb', 'ContinueToChat').
+   * 3. Checks WhatsApp's primary #action-button with matching text or web/send destination.
+   * 4. Checks links directly pointing to web.whatsapp.com/send.
+   * 5. Checks text keywords ('continue to whatsapp web', 'use whatsapp web', 'continue to chat').
+   * 6. Checks fallback links (e.g. a._9v6b).
+   * 7. Ensures destinationUrl preserves original phone and text parameters (never bare web.whatsapp.com).
+   *
+   * @param {Document} doc
+   * @param {Object} [pageUrlInfo] - Optional parsed URL info containing { phoneNormalized, text }
+   * @returns {{
+   *   found: boolean,
+   *   element: Element|null,
+   *   targetType: 'web'|'desktop'|'unknown',
+   *   destinationUrl: string,
+   *   visibleText: string,
+   *   isReady: boolean,
+   *   reason?: string
+   * }}
+   */
+  function detectContinueControl(doc, pageUrlInfo) {
     if (!doc) {
       return { found: false, element: null, targetType: 'unknown', destinationUrl: '', visibleText: '', isReady: false, reason: 'Document unavailable' };
     }
 
-    // Known positive text keywords
-    const webKeywords = [
+    // Known positive text keywords for the actual Continue action
+    const continueKeywords = [
       'continue to whatsapp web',
       'use whatsapp web',
-      'whatsapp web',
-      'continue to chat'
+      'continue to chat',
+      'open in whatsapp web'
     ];
 
-    function resolveDestinationUrl(href) {
-      if (!href) return '';
-      if (href.startsWith('//')) return `https:${href}`;
-      if (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('whatsapp://') || href.startsWith('intent://')) return href;
+    // Determine fallback phone and text from pageUrlInfo or doc location
+    let fallbackPhone = pageUrlInfo && (pageUrlInfo.phoneNormalized || pageUrlInfo.phone) || '';
+    let fallbackText = pageUrlInfo && pageUrlInfo.text || '';
+    if (!fallbackPhone && doc.defaultView && doc.defaultView.location && doc.defaultView.location.search) {
       try {
-        return new URL(href, 'https://web.whatsapp.com').href;
-      } catch {
-        return href;
+        const sp = new URLSearchParams(doc.defaultView.location.search);
+        fallbackPhone = (sp.get('phone') || '').replace(/[^0-9]/g, '');
+        fallbackText = sp.get('text') || '';
+      } catch {}
+    }
+
+    function resolveDestinationUrl(href) {
+      let resolved = '';
+      if (href) {
+        if (href.startsWith('//')) {
+          resolved = `https:${href}`;
+        } else if (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('whatsapp://') || href.startsWith('intent://')) {
+          resolved = href;
+        } else {
+          try {
+            resolved = new URL(href, 'https://web.whatsapp.com').href;
+          } catch {
+            resolved = href;
+          }
+        }
+      }
+
+      // If the destination URL is bare web.whatsapp.com or lacks recipient phone,
+      // preserve the original recipient and text parameters!
+      const hasPhoneParam = resolved && resolved.includes('phone=');
+      if (!hasPhoneParam && fallbackPhone) {
+        return buildWebSendUrl(fallbackPhone, fallbackText);
+      }
+
+      return resolved || (fallbackPhone ? buildWebSendUrl(fallbackPhone, fallbackText) : 'https://web.whatsapp.com/');
+    }
+
+    function checkIsReady(el) {
+      if (!isElementVisible(el)) return false;
+      if (el.hasAttribute && el.hasAttribute('disabled')) return false;
+      if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return false;
+      if (el.classList && el.classList.contains && el.classList.contains('disabled')) return false;
+      if (el.style && el.style.pointerEvents === 'none') return false;
+      return true;
+    }
+
+    // Priority 1: Elements with telemetry data-ms matching UseWhatsAppWeb or ContinueToChat
+    const telemetryElements = Array.from(doc.querySelectorAll('[data-ms]'));
+    for (const el of telemetryElements) {
+      if (isElementVisible(el)) {
+        const dataMs = (el.getAttribute('data-ms') || '').toLowerCase();
+        if (dataMs.includes('usewhatsappweb') || dataMs.includes('continuetochat')) {
+          const href = el.getAttribute('href') || '';
+          const text = el.textContent ? el.textContent.trim() : '';
+          return {
+            found: true,
+            element: el,
+            targetType: 'web',
+            destinationUrl: resolveDestinationUrl(href),
+            visibleText: text || 'Continue to WhatsApp Web',
+            isReady: checkIsReady(el)
+          };
+        }
       }
     }
 
-    // Priority 1: Elements pointing directly to web.whatsapp.com
-    const webAnchors = Array.from(doc.querySelectorAll('a[href*="web.whatsapp.com"]'));
-    for (const anchor of webAnchors) {
-      if (isElementVisible(anchor)) {
-        const text = anchor.textContent ? anchor.textContent.trim() : '';
-        const href = anchor.getAttribute('href') || '';
-        return {
-          found: true,
-          element: anchor,
-          targetType: 'web',
-          destinationUrl: resolveDestinationUrl(href),
-          visibleText: text || 'Continue to WhatsApp Web',
-          isReady: !anchor.hasAttribute('disabled') && !(anchor.classList && anchor.classList.contains && anchor.classList.contains('disabled'))
-        };
-      }
-    }
-
-    // Priority 2: Elements with id="action-button" (WhatsApp's primary action button)
-    // Query all elements with this ID to handle duplicate IDs
+    // Priority 2: Primary action buttons (WhatsApp uses id="action-button")
     const actionButtons = Array.from(doc.querySelectorAll('[id="action-button"]'));
     for (const btn of actionButtons) {
-      if (isElementVisible(btn)) {
+      if (isElementVisible(btn) && !isExcludedNavigationControl(btn)) {
         const href = btn.getAttribute('href') || '';
         const text = btn.textContent ? btn.textContent.trim() : '';
         const normText = normalizeText(text);
 
-        // Check if this action button directly points to web
-        if (href.includes('web.whatsapp.com') || webKeywords.some(kw => normText.includes(kw))) {
+        // Check if this action button directly points to web or matches continue keywords
+        if (href.includes('web.whatsapp.com') || continueKeywords.some(kw => normText.includes(kw))) {
           return {
             found: true,
             element: btn,
             targetType: 'web',
             destinationUrl: resolveDestinationUrl(href),
-            visibleText: text,
-            isReady: !btn.hasAttribute('disabled')
+            visibleText: text || 'Continue to WhatsApp Web',
+            isReady: checkIsReady(btn)
           };
         }
 
         // If it points to whatsapp:// or desktop protocol, look for secondary web fallback
         if (href.startsWith('whatsapp://') || href.startsWith('intent://')) {
-          // Check for fallback link near or below this button
           const fallback = doc.querySelector('a[href*="web.whatsapp.com"], a._9v6b, a[role="link"]');
-          if (fallback && isElementVisible(fallback)) {
+          if (fallback && isElementVisible(fallback) && !isExcludedNavigationControl(fallback)) {
             const fallbackHref = fallback.getAttribute('href') || '';
             const fallbackText = fallback.textContent ? fallback.textContent.trim() : '';
             return {
@@ -158,23 +278,40 @@
               targetType: 'web',
               destinationUrl: resolveDestinationUrl(fallbackHref),
               visibleText: fallbackText || 'use WhatsApp Web',
-              isReady: true
+              isReady: checkIsReady(fallback)
             };
           }
         }
       }
     }
 
-    // Priority 3: Any visible anchor or button matching visible text variations
+    // Priority 3: Links pointing directly to web.whatsapp.com/send
+    const sendAnchors = Array.from(doc.querySelectorAll('a[href*="web.whatsapp.com/send"]'));
+    for (const anchor of sendAnchors) {
+      if (isElementVisible(anchor) && !isExcludedNavigationControl(anchor)) {
+        const text = anchor.textContent ? anchor.textContent.trim() : '';
+        const href = anchor.getAttribute('href') || '';
+        return {
+          found: true,
+          element: anchor,
+          targetType: 'web',
+          destinationUrl: resolveDestinationUrl(href),
+          visibleText: text || 'Continue to WhatsApp Web',
+          isReady: checkIsReady(anchor)
+        };
+      }
+    }
+
+    // Priority 4: Any visible anchor or button matching continue text keywords
     const candidates = Array.from(doc.querySelectorAll('a, button, [role="link"], [role="button"]'));
     for (const el of candidates) {
-      if (!isElementVisible(el)) continue;
+      if (!isElementVisible(el) || isExcludedNavigationControl(el)) continue;
 
       const text = el.textContent ? el.textContent.trim() : '';
       const normText = normalizeText(text);
       const ariaLabel = normalizeText(el.getAttribute('aria-label') || '');
 
-      const isMatch = webKeywords.some(kw => normText.includes(kw) || ariaLabel.includes(kw));
+      const isMatch = continueKeywords.some(kw => normText.includes(kw) || ariaLabel.includes(kw));
       if (isMatch) {
         const href = el.getAttribute('href') || '';
         return {
@@ -182,8 +319,25 @@
           element: el,
           targetType: href.includes('web.whatsapp.com') ? 'web' : 'unknown',
           destinationUrl: resolveDestinationUrl(href),
-          visibleText: text,
-          isReady: !el.hasAttribute('disabled')
+          visibleText: text || 'Continue to WhatsApp Web',
+          isReady: checkIsReady(el)
+        };
+      }
+    }
+
+    // Priority 5: Fallback links pointing to web.whatsapp.com
+    const webAnchors = Array.from(doc.querySelectorAll('a[href*="web.whatsapp.com"], a._9v6b'));
+    for (const anchor of webAnchors) {
+      if (isElementVisible(anchor) && !isExcludedNavigationControl(anchor)) {
+        const text = anchor.textContent ? anchor.textContent.trim() : '';
+        const href = anchor.getAttribute('href') || '';
+        return {
+          found: true,
+          element: anchor,
+          targetType: 'web',
+          destinationUrl: resolveDestinationUrl(href),
+          visibleText: text || 'Continue to WhatsApp Web',
+          isReady: checkIsReady(anchor)
         };
       }
     }
@@ -206,16 +360,16 @@
    * @param {Document} doc
    * @param {Function} onDetected - callback({ found, element, targetType, destinationUrl, visibleText })
    * @param {number} timeoutMs - Max time to observe before reporting failure (default 10000ms)
+   * @param {Object} [pageUrlInfo] - Optional parsed URL info
    * @returns {{ disconnect: Function }}
    */
-  function observeContinueControl(doc, onDetected, timeoutMs = 10000) {
+  function observeContinueControl(doc, onDetected, timeoutMs = 10000, pageUrlInfo) {
     if (!doc || !doc.body) {
-      // If body not ready, try on DOMContentLoaded or immediate check
       return { disconnect: () => {} };
     }
 
     // Initial check
-    const initialResult = detectContinueControl(doc);
+    const initialResult = detectContinueControl(doc, pageUrlInfo);
     if (initialResult.found) {
       onDetected(initialResult);
       return { disconnect: () => {} };
@@ -238,12 +392,12 @@
     timer = setTimeout(() => {
       cleanup();
       // Final check upon timeout
-      const finalResult = detectContinueControl(doc);
+      const finalResult = detectContinueControl(doc, pageUrlInfo);
       onDetected(finalResult);
     }, timeoutMs);
 
     observer = new MutationObserver(() => {
-      const res = detectContinueControl(doc);
+      const res = detectContinueControl(doc, pageUrlInfo);
       if (res.found) {
         cleanup();
         onDetected(res);
@@ -254,10 +408,54 @@
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['href', 'style', 'class', 'disabled']
+      attributeFilter: ['href', 'style', 'class', 'disabled', 'aria-disabled']
     });
 
     return { disconnect: cleanup };
+  }
+
+  /**
+   * Triggers the genuine user-facing activation sequence on a Continue or chat control.
+   * Dispatches realistic pointer, mouse, and click events, focuses the control, and invokes .click().
+   * @param {Element} el
+   * @returns {boolean}
+   */
+  function activateControl(el) {
+    if (!el) return false;
+
+    const doc = el.ownerDocument || (typeof document !== 'undefined' ? document : null);
+    const win = (doc && doc.defaultView) || (typeof window !== 'undefined' ? window : null);
+
+    try {
+      if (typeof el.focus === 'function') el.focus();
+    } catch {}
+
+    const eventNames = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+    for (const evtName of eventNames) {
+      try {
+        let ev;
+        if (evtName.startsWith('pointer') && typeof PointerEvent !== 'undefined') {
+          ev = new PointerEvent(evtName, { bubbles: true, cancelable: true, view: win, buttons: 1 });
+        } else if (typeof MouseEvent !== 'undefined') {
+          ev = new MouseEvent(evtName, { bubbles: true, cancelable: true, view: win, buttons: 1 });
+        } else if (typeof Event !== 'undefined') {
+          ev = new Event(evtName, { bubbles: true, cancelable: true });
+        } else {
+          ev = { type: evtName, bubbles: true, cancelable: true };
+        }
+        if (typeof el.dispatchEvent === 'function') {
+          el.dispatchEvent(ev);
+        }
+      } catch {}
+    }
+
+    try {
+      if (typeof el.click === 'function') {
+        el.click();
+      }
+    } catch {}
+
+    return true;
   }
 
   /**
@@ -512,6 +710,56 @@
   }
 
   /**
+   * Activates and focuses the WhatsApp Web Lexical composer, ensuring React/Lexical registers
+   * user interaction, caret is placed at the end of the text, and Send button is enabled.
+   * @param {Element} composerEl
+   * @param {string} [messageText]
+   */
+  function activateAndFocusComposer(composerEl, messageText = '') {
+    if (!composerEl) return;
+    const doc = composerEl.ownerDocument || (typeof document !== 'undefined' ? document : null);
+    const win = (doc && doc.defaultView) || (typeof window !== 'undefined' ? window : null);
+
+    try {
+      if (win && typeof win.focus === 'function') win.focus();
+    } catch {}
+
+    // Dispatch realistic activation sequence so Lexical's root listeners recognize active interaction
+    const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+    for (const name of events) {
+      try {
+        let ev;
+        if (name.startsWith('pointer') && typeof PointerEvent !== 'undefined') {
+          ev = new PointerEvent(name, { bubbles: true, cancelable: true, view: win });
+        } else if (typeof MouseEvent !== 'undefined') {
+          ev = new MouseEvent(name, { bubbles: true, cancelable: true, view: win });
+        } else if (typeof Event !== 'undefined') {
+          ev = new Event(name, { bubbles: true, cancelable: true });
+        }
+        if (ev && typeof composerEl.dispatchEvent === 'function') {
+          composerEl.dispatchEvent(ev);
+        }
+      } catch {}
+    }
+
+    try {
+      if (typeof composerEl.focus === 'function') {
+        composerEl.focus();
+      }
+    } catch {}
+
+    // Position cursor at the very end of the deepest text node
+    focusAndPlaceCursorAtEnd(composerEl);
+
+    // Notify document selectionchange so Lexical updates its internal selection state
+    try {
+      if (doc && typeof doc.dispatchEvent === 'function') {
+        doc.dispatchEvent(new Event('selectionchange', { bubbles: true }));
+      }
+    } catch {}
+  }
+
+  /**
    * Inserts text directly into WhatsApp Web's Lexical composer.
    * Utilizes execCommand('insertText') (which triggers native Chromium beforeinput events that Lexical listens to),
    * followed by synthetic InputEvents and paste fallbacks.
@@ -527,21 +775,18 @@
     const initialRaw = composerEl.innerText || composerEl.textContent || '';
     const initialClean = stripZeroWidth(initialRaw);
     if (initialClean === messageText || initialClean.includes(messageText)) {
-      focusAndPlaceCursorAtEnd(composerEl);
+      activateAndFocusComposer(composerEl, messageText);
       return true;
     }
 
-    const doc = composerEl.ownerDocument || document;
-    const win = doc.defaultView || (typeof window !== 'undefined' ? window : null);
+    const doc = composerEl.ownerDocument || (typeof document !== 'undefined' ? document : null);
+    const win = (doc && doc.defaultView) || (typeof window !== 'undefined' ? window : null);
 
-    // 1. Focus the window and the composer element
-    try {
-      if (win && typeof win.focus === 'function') win.focus();
-      composerEl.focus();
-    } catch {}
+    // 1. Activate and focus the composer element
+    activateAndFocusComposer(composerEl, messageText);
 
     // 2. Position cursor range inside the editor
-    if (win && win.getSelection && doc.createRange) {
+    if (win && win.getSelection && doc && doc.createRange) {
       try {
         const sel = win.getSelection();
         const range = doc.createRange();
@@ -580,6 +825,8 @@
         }
 
         // Direct DOM structure reinforcement for Lexical:
+        // IMPORTANT: NEVER overwrite composerEl.textContent or composerEl.innerText directly,
+        // as doing so destroys Lexical's internal <p> and <span data-lexical-text="true"> tree.
         let p = composerEl.querySelector('p');
         if (!p) {
           p = doc.createElement('p');
@@ -594,9 +841,10 @@
           p.appendChild(span);
         }
         span.textContent = messageText;
-        p.textContent = messageText;
-        composerEl.textContent = messageText;
-        composerEl.innerText = messageText;
+
+        if (!stripZeroWidth(composerEl.innerText || composerEl.textContent || '')) {
+          composerEl.textContent = messageText;
+        }
 
         if (typeof InputEvent !== 'undefined' && typeof composerEl.dispatchEvent === 'function') {
           composerEl.dispatchEvent(new InputEvent('input', {
@@ -634,7 +882,7 @@
     }
 
     // 6. Caret adjustment: focus and collapse selection to the very end of the message
-    focusAndPlaceCursorAtEnd(composerEl);
+    activateAndFocusComposer(composerEl, messageText);
 
     // Final check
     const finalClean = stripZeroWidth(composerEl.innerText || composerEl.textContent || '');
@@ -646,6 +894,8 @@
     normalizeText,
     stripZeroWidth,
     focusAndPlaceCursorAtEnd,
+    activateControl,
+    activateAndFocusComposer,
     detectContinueControl,
     observeContinueControl,
     inspectWhatsAppWeb,

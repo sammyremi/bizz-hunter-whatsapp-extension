@@ -23,14 +23,37 @@ class MockElement {
     this.tagName = tag.toUpperCase();
     this.nodeType = 1;
     this.attributes = Object.assign({}, attrs);
-    this.textContent = text;
-    this.innerText = text;
+    this._textContent = text;
     this.children = [];
     this.parentElement = null;
     this.classList = new DOMTokenList(attrs.class || '');
     this.style = {};
     this.offsetParent = {}; // indicates visible
     this.listeners = {};
+  }
+
+  get childNodes() {
+    return this.children;
+  }
+
+  get textContent() {
+    if (this.children && this.children.length > 0) {
+      return this.children.map(c => c.textContent).join('');
+    }
+    return this._textContent !== undefined ? this._textContent : '';
+  }
+
+  set textContent(val) {
+    this._textContent = String(val);
+    this.children = [];
+  }
+
+  get innerText() {
+    return this.textContent;
+  }
+
+  set innerText(val) {
+    this.textContent = val;
   }
 
   focus() {
